@@ -2064,7 +2064,7 @@ ${ttsHint}${sttHint}`;
                 ws.send(JSON.stringify({
                   op: 6, // Resume
                   d: {
-                    token: `UmiBot ${accessToken}`,
+                    token: `QQBot ${accessToken}`,
                     session_id: sessionId,
                     seq: lastSeq,
                   },
@@ -2078,7 +2078,7 @@ ${ttsHint}${sttHint}`;
                 ws.send(JSON.stringify({
                   op: 2,
                   d: {
-                    token: `UmiBot ${accessToken}`,
+                    token: `QQBot ${accessToken}`,
                     intents: intentLevel.intents,
                     shard: [0, 1],
                   },
