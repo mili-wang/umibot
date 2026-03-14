@@ -179,30 +179,30 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
      * - channel:channelid -> 频道
      * - 纯 openid（32位十六进制）-> 私聊
      */
-    normalizeTarget: (target: string): string | undefined => {
+    normalizeTarget: (target: string) => {
       // 去掉 umibot: 前缀（如果有）
       const id = target.replace(/^umibot:/i, "");
-      
+
       // 检查是否是已知格式
       if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
-        return `umibot:${id}`;
+        return { ok: true, to: `umibot:${id}` };
       }
-      
+
       // 检查是否是纯 openid（32位十六进制，不带连字符）
       // Umi Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
       const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
       if (openIdHexPattern.test(id)) {
-        return `umibot:c2c:${id}`;
+        return { ok: true, to: `umibot:c2c:${id}` };
       }
 
       // 检查是否是 UUID 格式的 openid（带连字符）
       const openIdUuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
       if (openIdUuidPattern.test(id)) {
-        return `umibot:c2c:${id}`;
+        return { ok: true, to: `umibot:c2c:${id}` };
       }
-      
-      // 不认识的格式，返回 undefined
-      return undefined;
+
+      // 不认识的格式
+      return { ok: false, error: "无法识别的目标格式" };
     },
     /**
      * 目标解析器配置
