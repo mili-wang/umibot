@@ -1,5 +1,5 @@
 {
-  "name": "umibot-openclaw-plugin",
+  "name": "@mili-wang/umibot",
   "version": "1.5.4",
   "type": "module",
   "main": "dist/index.js",
