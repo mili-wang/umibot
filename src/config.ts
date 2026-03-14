@@ -1,18 +1,18 @@
-import type { ResolvedUmiBotAccount, UmiBotAccountConfig } from "./types.js";
+import type { ResolvedQQBotAccount, QQBotAccountConfig } from "./types.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
 export const DEFAULT_ACCOUNT_ID = "default";
 
-interface UmiBotChannelConfig extends UmiBotAccountConfig {
-  accounts?: Record<string, UmiBotAccountConfig>;
+interface QQBotChannelConfig extends QQBotAccountConfig {
+  accounts?: Record<string, QQBotAccountConfig>;
 }
 
 /**
- * 列出所有 UmiBot 账户 ID
+ * 列出所有 QQBot 账户 ID
  */
-export function listUmiBotAccountIds(cfg: OpenClawConfig): string[] {
+export function listQQBotAccountIds(cfg: OpenClawConfig): string[] {
   const ids = new Set<string>();
-  const umibot = cfg.channels?.umibot as UmiBotChannelConfig | undefined;
+  const umibot = cfg.channels?.umibot as QQBotChannelConfig | undefined;
 
   if (umibot?.appId) {
     ids.add(DEFAULT_ACCOUNT_ID);
@@ -32,8 +32,8 @@ export function listUmiBotAccountIds(cfg: OpenClawConfig): string[] {
 /**
  * 获取默认账户 ID
  */
-export function resolveDefaultUmiBotAccountId(cfg: OpenClawConfig): string {
-  const umibot = cfg.channels?.umibot as UmiBotChannelConfig | undefined;
+export function resolveDefaultQQBotAccountId(cfg: OpenClawConfig): string {
+  const umibot = cfg.channels?.umibot as QQBotChannelConfig | undefined;
   // 如果有默认账户配置，返回 default
   if (umibot?.appId) {
     return DEFAULT_ACCOUNT_ID;
@@ -49,17 +49,17 @@ export function resolveDefaultUmiBotAccountId(cfg: OpenClawConfig): string {
 }
 
 /**
- * 解析 UmiBot 账户配置
+ * 解析 QQBot 账户配置
  */
-export function resolveUmiBotAccount(
+export function resolveQQBotAccount(
   cfg: OpenClawConfig,
   accountId?: string | null
-): ResolvedUmiBotAccount {
+): ResolvedQQBotAccount {
   const resolvedAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
-  const umibot = cfg.channels?.umibot as UmiBotChannelConfig | undefined;
+  const umibot = cfg.channels?.umibot as QQBotChannelConfig | undefined;
 
   // 基础配置
-  let accountConfig: UmiBotAccountConfig = {};
+  let accountConfig: QQBotAccountConfig = {};
   let appId = "";
   let clientSecret = "";
   let secretSource: "config" | "file" | "env" | "none" = "none";
@@ -93,14 +93,14 @@ export function resolveUmiBotAccount(
   } else if (accountConfig.clientSecretFile) {
     // 从文件读取（运行时处理）
     secretSource = "file";
-  } else if (process.env.UmiBOT_CLIENT_SECRET && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
-    clientSecret = process.env.UmiBOT_CLIENT_SECRET;
+  } else if (process.env.QQBOT_CLIENT_SECRET && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
+    clientSecret = process.env.QQBOT_CLIENT_SECRET;
     secretSource = "env";
   }
 
   // AppId 也可以从环境变量读取
-  if (!appId && process.env.UmiBOT_APP_ID && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
-    appId = process.env.UmiBOT_APP_ID;
+  if (!appId && process.env.QQBOT_APP_ID && resolvedAccountId === DEFAULT_ACCOUNT_ID) {
+    appId = process.env.QQBOT_APP_ID;
   }
 
   return {
@@ -111,7 +111,7 @@ export function resolveUmiBotAccount(
     clientSecret,
     secretSource,
     systemPrompt: accountConfig.systemPrompt,
-    imageServerBaseUrl: accountConfig.imageServerBaseUrl || process.env.UmiBOT_IMAGE_SERVER_BASE_URL,
+    imageServerBaseUrl: accountConfig.imageServerBaseUrl || process.env.QQBOT_IMAGE_SERVER_BASE_URL,
     markdownSupport: accountConfig.markdownSupport !== false,
     config: accountConfig,
   };
@@ -120,7 +120,7 @@ export function resolveUmiBotAccount(
 /**
  * 应用账户配置
  */
-export function applyUmiBotAccountConfig(
+export function applyQQBotAccountConfig(
   cfg: OpenClawConfig,
   accountId: string,
   input: { appId?: string; clientSecret?: string; clientSecretFile?: string; name?: string; imageServerBaseUrl?: string }
@@ -129,7 +129,7 @@ export function applyUmiBotAccountConfig(
 
   if (accountId === DEFAULT_ACCOUNT_ID) {
     // 如果没有设置过 allowFrom，默认设置为 ["*"]
-    const existingConfig = (next.channels?.umibot as UmiBotChannelConfig) || {};
+    const existingConfig = (next.channels?.umibot as QQBotChannelConfig) || {};
     const allowFrom = existingConfig.allowFrom ?? ["*"];
     
     next.channels = {
@@ -150,7 +150,7 @@ export function applyUmiBotAccountConfig(
     };
   } else {
     // 如果没有设置过 allowFrom，默认设置为 ["*"]
-    const existingAccountConfig = (next.channels?.umibot as UmiBotChannelConfig)?.accounts?.[accountId] || {};
+    const existingAccountConfig = (next.channels?.umibot as QQBotChannelConfig)?.accounts?.[accountId] || {};
     const allowFrom = existingAccountConfig.allowFrom ?? ["*"];
     
     next.channels = {
@@ -159,9 +159,9 @@ export function applyUmiBotAccountConfig(
         ...(next.channels?.umibot as Record<string, unknown> || {}),
         enabled: true,
         accounts: {
-          ...((next.channels?.umibot as UmiBotChannelConfig)?.accounts || {}),
+          ...((next.channels?.umibot as QQBotChannelConfig)?.accounts || {}),
           [accountId]: {
-            ...((next.channels?.umibot as UmiBotChannelConfig)?.accounts?.[accountId] || {}),
+            ...((next.channels?.umibot as QQBotChannelConfig)?.accounts?.[accountId] || {}),
             enabled: true,
             allowFrom,
             ...(input.appId ? { appId: input.appId } : {}),

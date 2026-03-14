@@ -156,7 +156,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   const url = new URL(req.url || "/", `http://localhost:${currentConfig.port}`);
   const pathname = url.pathname;
 
-  // 设置 CORS 头（允许 Umi 服务器访问）
+  // 设置 CORS 头（允许 QQ 服务器访问）
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 

@@ -1,16 +1,16 @@
 /**
- * Umi Bot 配置类型
+ * QQ Bot 配置类型
  */
-export interface UmiBotConfig {
+export interface QQBotConfig {
   appId: string;
   clientSecret?: string;
   clientSecretFile?: string;
 }
 
 /**
- * 解析后的 Umi Bot 账户
+ * 解析后的 QQ Bot 账户
  */
-export interface ResolvedUmiBotAccount {
+export interface ResolvedQQBotAccount {
   accountId: string;
   name?: string;
   enabled: boolean;
@@ -23,13 +23,13 @@ export interface ResolvedUmiBotAccount {
   imageServerBaseUrl?: string;
   /** 是否支持 markdown 消息（默认 true） */
   markdownSupport: boolean;
-  config: UmiBotAccountConfig;
+  config: QQBotAccountConfig;
 }
 
 /**
- * Umi Bot 账户配置
+ * QQ Bot 账户配置
  */
-export interface UmiBotAccountConfig {
+export interface QQBotAccountConfig {
   enabled?: boolean;
   name?: string;
   appId?: string;
@@ -67,8 +67,8 @@ export interface AudioFormatPolicy {
    */
   sttDirectFormats?: string[];
   /**
-   * Umi 平台支持直传的音频格式（出站：跳过→SILK 转换）
-   * 默认为 [".wav", ".mp3", ".silk"]（Umi Bot API 原生支持的三种格式）
+   * QQ 平台支持直传的音频格式（出站：跳过→SILK 转换）
+   * 默认为 [".wav", ".mp3", ".silk"]（QQ Bot API 原生支持的三种格式）
    * 仅当需要覆盖默认值时才配置此项
    */
   uploadDirectFormats?: string[];
@@ -84,7 +84,7 @@ export interface MessageAttachment {
   width?: number;
   size?: number;
   url: string;
-  voice_wav_url?: string;  // Umi 提供的 WAV 格式语音直链，有值时优先使用以避免 SILK→WAV 转换
+  voice_wav_url?: string;  // QQ 提供的 WAV 格式语音直链，有值时优先使用以避免 SILK→WAV 转换
 }
 
 /**

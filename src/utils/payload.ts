@@ -1,5 +1,5 @@
 /**
- * UmiBot 结构化消息载荷工具
+ * QQBot 结构化消息载荷工具
  * 
  * 用于处理 AI 输出的结构化消息载荷，包括：
  * - 定时提醒载荷 (cron_reminder)
@@ -41,9 +41,9 @@ export interface MediaPayload {
 }
 
 /**
- * UmiBot 载荷联合类型
+ * QQBot 载荷联合类型
  */
-export type UmiBotPayload = CronReminderPayload | MediaPayload;
+export type QQBotPayload = CronReminderPayload | MediaPayload;
 
 /**
  * 解析结果
@@ -52,7 +52,7 @@ export interface ParseResult {
   /** 是否为结构化载荷 */
   isPayload: boolean;
   /** 解析后的载荷对象（如果是结构化载荷） */
-  payload?: UmiBotPayload;
+  payload?: QQBotPayload;
   /** 原始文本（如果不是结构化载荷） */
   text?: string;
   /** 解析错误信息（如果解析失败） */
@@ -64,10 +64,10 @@ export interface ParseResult {
 // ============================================
 
 /** AI 输出的结构化载荷前缀 */
-const PAYLOAD_PREFIX = 'UmiBOT_PAYLOAD:';
+const PAYLOAD_PREFIX = 'QQBOT_PAYLOAD:';
 
 /** Cron 消息存储的前缀 */
-const CRON_PREFIX = 'UmiBOT_CRON:';
+const CRON_PREFIX = 'QQBOT_CRON:';
 
 // ============================================
 // 解析函数
@@ -76,21 +76,21 @@ const CRON_PREFIX = 'UmiBOT_CRON:';
 /**
  * 解析 AI 输出的结构化载荷
  * 
- * 检测消息是否以 UmiBOT_PAYLOAD: 前缀开头，如果是则提取并解析 JSON
+ * 检测消息是否以 QQBOT_PAYLOAD: 前缀开头，如果是则提取并解析 JSON
  * 
  * @param text AI 输出的原始文本
  * @returns 解析结果
  * 
  * @example
- * const result = parseUmiBotPayload('UmiBOT_PAYLOAD:\n{"type": "media", "mediaType": "image", ...}');
+ * const result = parseQQBotPayload('QQBOT_PAYLOAD:\n{"type": "media", "mediaType": "image", ...}');
  * if (result.isPayload && result.payload) {
  *   // 处理结构化载荷
  * }
  */
-export function parseUmiBotPayload(text: string): ParseResult {
+export function parseQQBotPayload(text: string): ParseResult {
   const trimmedText = text.trim();
   
-  // 检查是否以 UmiBOT_PAYLOAD: 开头
+  // 检查是否以 QQBOT_PAYLOAD: 开头
   if (!trimmedText.startsWith(PAYLOAD_PREFIX)) {
     return {
       isPayload: false,
@@ -109,7 +109,7 @@ export function parseUmiBotPayload(text: string): ParseResult {
   }
   
   try {
-    const payload = JSON.parse(jsonContent) as UmiBotPayload;
+    const payload = JSON.parse(jsonContent) as QQBotPayload;
     
     // 验证必要字段
     if (!payload.type) {
@@ -155,10 +155,10 @@ export function parseUmiBotPayload(text: string): ParseResult {
 /**
  * 将定时提醒载荷编码为 Cron 消息格式
  * 
- * 将 JSON 编码为 Base64，并添加 UmiBOT_CRON: 前缀
+ * 将 JSON 编码为 Base64，并添加 QQBOT_CRON: 前缀
  * 
  * @param payload 定时提醒载荷
- * @returns 编码后的消息字符串，格式为 UmiBOT_CRON:{base64}
+ * @returns 编码后的消息字符串，格式为 QQBOT_CRON:{base64}
  * 
  * @example
  * const message = encodePayloadForCron({
@@ -167,7 +167,7 @@ export function parseUmiBotPayload(text: string): ParseResult {
  *   targetType: 'c2c',
  *   targetAddress: 'user_openid_xxx'
  * });
- * // 返回: UmiBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs...
+ * // 返回: QQBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs...
  */
 export function encodePayloadForCron(payload: CronReminderPayload): string {
   const jsonString = JSON.stringify(payload);
@@ -178,13 +178,13 @@ export function encodePayloadForCron(payload: CronReminderPayload): string {
 /**
  * 解码 Cron 消息中的载荷
  * 
- * 检测 UmiBOT_CRON: 前缀，解码 Base64 并解析 JSON
+ * 检测 QQBOT_CRON: 前缀，解码 Base64 并解析 JSON
  * 
  * @param message Cron 触发时收到的消息
  * @returns 解码结果，包含是否为 Cron 载荷、解析后的载荷对象或错误信息
  * 
  * @example
- * const result = decodeCronPayload('UmiBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs...');
+ * const result = decodeCronPayload('QQBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs...');
  * if (result.isCronPayload && result.payload) {
  *   // 处理定时提醒
  * }
@@ -196,7 +196,7 @@ export function decodeCronPayload(message: string): {
 } {
   const trimmedMessage = message.trim();
   
-  // 检查是否以 UmiBOT_CRON: 开头
+  // 检查是否以 QQBOT_CRON: 开头
   if (!trimmedMessage.startsWith(CRON_PREFIX)) {
     return {
       isCronPayload: false
@@ -253,13 +253,13 @@ export function decodeCronPayload(message: string): {
 /**
  * 判断载荷是否为定时提醒类型
  */
-export function isCronReminderPayload(payload: UmiBotPayload): payload is CronReminderPayload {
+export function isCronReminderPayload(payload: QQBotPayload): payload is CronReminderPayload {
   return payload.type === 'cron_reminder';
 }
 
 /**
  * 判断载荷是否为媒体消息类型
  */
-export function isMediaPayload(payload: UmiBotPayload): payload is MediaPayload {
+export function isMediaPayload(payload: QQBotPayload): payload is MediaPayload {
   return payload.type === 'media';
 }

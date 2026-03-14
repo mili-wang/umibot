@@ -1,18 +1,18 @@
 import WebSocket from "ws";
 import path from "node:path";
 import * as fs from "node:fs";
-import type { ResolvedUmiBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
+import type { ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
 import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, sendC2CImageMessage, sendGroupImageMessage, sendC2CVoiceMessage, sendGroupVoiceMessage, sendC2CVideoMessage, sendGroupVideoMessage, sendC2CFileMessage, sendGroupFileMessage, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify } from "./api.js";
 import { loadSession, saveSession, clearSession, type SessionState } from "./session-store.js";
 import { recordKnownUser, flushKnownUsers } from "./known-users.js";
-import { getUmiBotRuntime } from "./runtime.js";
+import { getQQBotRuntime } from "./runtime.js";
 import { startImageServer, isImageServerRunning, downloadFile, type ImageServerConfig } from "./image-server.js";
-import { getImageSize, formatUmiBotMarkdownImage, hasUmiBotImageSize, DEFAULT_IMAGE_SIZE } from "./utils/image-size.js";
-import { parseUmiBotPayload, encodePayloadForCron, isCronReminderPayload, isMediaPayload, type CronReminderPayload, type MediaPayload } from "./utils/payload.js";
+import { getImageSize, formatQQBotMarkdownImage, hasQQBotImageSize, DEFAULT_IMAGE_SIZE } from "./utils/image-size.js";
+import { parseQQBotPayload, encodePayloadForCron, isCronReminderPayload, isMediaPayload, type CronReminderPayload, type MediaPayload } from "./utils/payload.js";
 import { convertSilkToWav, isVoiceAttachment, formatDuration, resolveTTSConfig, textToSilk, audioFileToSilkBase64, waitForFile, isAudioFile } from "./utils/audio-convert.js";
 import { normalizeMediaTags } from "./utils/media-tags.js";
 import { checkFileSize, readFileAsync, fileExistsAsync, isLargeFile, formatFileSize } from "./utils/file-utils.js";
-import { getUmiBotDataDir, isLocalPath as isLocalFilePath, looksLikeLocalPath, normalizePath, sanitizeFileName, runDiagnostics } from "./utils/platform.js";
+import { getQQBotDataDir, isLocalPath as isLocalFilePath, looksLikeLocalPath, normalizePath, sanitizeFileName, runDiagnostics } from "./utils/platform.js";
 
 /**
  * 通用 OpenAI 兼容 STT（语音转文字）
@@ -96,7 +96,7 @@ async function transcribeAudio(audioPath: string, cfg: Record<string, unknown>):
   return result.text?.trim() || null;
 }
 
-// Umi Bot intents - 按权限级别分组
+// QQ Bot intents - 按权限级别分组
 const INTENTS = {
   // 基础权限（默认有）
   GUILDS: 1 << 0,                    // 频道相关
@@ -137,9 +137,9 @@ const MAX_QUICK_DISCONNECT_COUNT = 3; // 连续快速断开次数阈值
 const QUICK_DISCONNECT_THRESHOLD = 5000; // 5秒内断开视为快速断开
 
 // 图床服务器配置（可通过环境变量覆盖）
-const IMAGE_SERVER_PORT = parseInt(process.env.UmiBOT_IMAGE_SERVER_PORT || "18765", 10);
+const IMAGE_SERVER_PORT = parseInt(process.env.QQBOT_IMAGE_SERVER_PORT || "18765", 10);
 // 使用绝对路径，确保文件保存和读取使用同一目录
-const IMAGE_SERVER_DIR = process.env.UmiBOT_IMAGE_SERVER_DIR || getUmiBotDataDir("images");
+const IMAGE_SERVER_DIR = process.env.QQBOT_IMAGE_SERVER_DIR || getQQBotDataDir("images");
 
 // 消息队列配置（异步处理，防止阻塞心跳）
 const MESSAGE_QUEUE_SIZE = 1000; // 最大队列长度（全局总量）
@@ -211,10 +211,10 @@ function recordMessageReply(messageId: string): void {
   }
 }
 
-// ============ Umi 表情标签解析 ============
+// ============ QQ 表情标签解析 ============
 
 /**
- * 解析 Umi 表情标签，将 <faceType=1,faceId="13",ext="base64..."> 格式
+ * 解析 QQ 表情标签，将 <faceType=1,faceId="13",ext="base64..."> 格式
  * 替换为 【表情: 中文名】 格式
  * ext 字段为 Base64 编码的 JSON，格式如 {"text":"呲牙"}
  */
@@ -276,7 +276,7 @@ function filterInternalMarkers(text: string): string {
 }
 
 export interface GatewayContext {
-  account: ResolvedUmiBotAccount;
+  account: ResolvedQQBotAccount;
   abortSignal: AbortSignal;
   cfg: unknown;
   onReady?: (data: unknown) => void;
@@ -337,7 +337,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   const { account, abortSignal, cfg, onReady, onError, log } = ctx;
 
   if (!account.appId || !account.clientSecret) {
-    throw new Error("UmiBot not configured (missing appId or clientSecret)");
+    throw new Error("QQBot not configured (missing appId or clientSecret)");
   }
 
   // 启动环境诊断（首次连接时执行）
@@ -572,7 +572,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
       const ws = new WebSocket(gatewayUrl);
       currentWs = ws;
 
-      const pluginRuntime = getUmiBotRuntime();
+      const pluginRuntime = getQQBotRuntime();
 
       // 处理收到的消息
       const handleMessage = async (event: {
@@ -659,13 +659,13 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         const imageMediaTypes: string[] = [];
         const voiceTranscripts: string[] = [];
         // 存到 .openclaw/umibot 目录下的 downloads 文件夹
-        const downloadDir = getUmiBotDataDir("downloads");
+        const downloadDir = getQQBotDataDir("downloads");
         
         if (event.attachments?.length) {
           const otherAttachments: string[] = [];
           
           for (const att of event.attachments) {
-            // 修复 Umi 返回的 // 前缀 URL
+            // 修复 QQ 返回的 // 前缀 URL
             const attUrl = att.url?.startsWith("//") ? `https:${att.url}` : att.url;
 
             // 语音附件：优先下载 WAV（voice_wav_url），减少 SILK→WAV 转换
@@ -764,7 +764,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             : voiceTranscripts.map((t, i) => `[语音${i + 1}] ${t}`).join("\n");
         }
 
-        // 解析 Umi 表情标签，将 <faceType=...,ext="base64"> 替换为 【表情: 中文名】
+        // 解析 QQ 表情标签，将 <faceType=...,ext="base64"> 替换为 【表情: 中文名】
         const parsedContent = parseFaceTags(event.content);
         const userContent = voiceText
           ? (parsedContent.trim() ? `${parsedContent}\n${voiceText}` : voiceText) + attachmentInfo
@@ -795,33 +795,33 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           receivedMediaSection = `\n- 附件:\n${entries.join("\n")}`;
         }
 
-        // AI 看到的投递地址必须带完整前缀（umibot:c2c: / umibot:group:）
+        // AI 看到的投递地址必须带完整前缀（qqbot:c2c: / umibot:group:）
         const qualifiedTarget = isGroupChat ? `umibot:group:${event.groupOpenid}` : `umibot:c2c:${event.senderId}`;
 
         // 动态检测 TTS/STT 配置状态
         const hasTTS = !!resolveTTSConfig(cfg as Record<string, unknown>);
         const hasSTT = !!resolveSTTConfig(cfg as Record<string, unknown>);
 
-        // 语音能力说明：<umivoice> 标签本身只负责发送已有的音频文件，不依赖插件 TTS。
+        // 语音能力说明：<qqvoice> 标签本身只负责发送已有的音频文件，不依赖插件 TTS。
         // TTS 只是生成音频文件的一种方式，框架侧的 TTS 工具（如 audio_speech）也能生成。
-        // 因此始终暴露 <umivoice> 能力，但根据 TTS 状态给出不同的使用指引。
+        // 因此始终暴露 <qqvoice> 能力，但根据 TTS 状态给出不同的使用指引。
         const ttsHint = hasTTS
-          ? `6. 🎤 插件 TTS 已启用: 如果你有 TTS 工具（如 audio_speech），可用它生成音频文件后用 <umivoice> 发送`
-          : `6. ⚠️ 插件 TTS 未配置: 如果你有 TTS 工具（如 audio_speech），仍可用它生成音频文件后用 <umivoice> 发送；若无 TTS 工具，则无法主动生成语音`;
+          ? `6. 🎤 插件 TTS 已启用: 如果你有 TTS 工具（如 audio_speech），可用它生成音频文件后用 <qqvoice> 发送`
+          : `6. ⚠️ 插件 TTS 未配置: 如果你有 TTS 工具（如 audio_speech），仍可用它生成音频文件后用 <qqvoice> 发送；若无 TTS 工具，则无法主动生成语音`;
         const sttHint = hasSTT
           ? `\n7. 用户发送的语音消息会自动转录为文字`
           : `\n7. 语音识别未配置（STT），无法自动转录用户的语音消息`;
         const voiceSection = `
 
 【发送语音 - 必须遵守】
-1. 发语音方法: 在回复文本中写 <umivoice>本地音频文件路径</umivoice>，系统自动处理
-2. 示例: "来听听吧！ <umivoice>/tmp/tts/voice.mp3</umivoice>"
+1. 发语音方法: 在回复文本中写 <qqvoice>本地音频文件路径</qqvoice>，系统自动处理
+2. 示例: "来听听吧！ <qqvoice>/tmp/tts/voice.mp3</qqvoice>"
 3. 支持格式: .silk, .slk, .slac, .amr, .wav, .mp3, .ogg, .pcm
-4. ⚠️ <umivoice> 只用于语音文件，图片请用 <umiimg>；两者不要混用
+4. ⚠️ <qqvoice> 只用于语音文件，图片请用 <qqimg>；两者不要混用
 5. 可以同时发送文字和语音，系统会按顺序投递
 ${ttsHint}${sttHint}`;
 
-        const contextInfo = `你正在通过 Umi 与用户对话。
+        const contextInfo = `你正在通过 QQ 与用户对话。
 
 【会话上下文】
 - 用户: ${event.senderName || "未知"} (${event.senderId})
@@ -832,24 +832,24 @@ ${ttsHint}${sttHint}`;
 - 定时提醒投递地址: channel=umibot, to=${qualifiedTarget}
 
 【发送图片 - 必须遵守】
-1. 发图方法: 在回复文本中写 <umiimg>URL</umiimg>，系统自动处理
-2. 示例: "龙虾来啦！🦞 <umiimg>https://picsum.photos/800/600</umiimg>"
+1. 发图方法: 在回复文本中写 <qqimg>URL</qqimg>，系统自动处理
+2. 示例: "龙虾来啦！🦞 <qqimg>https://picsum.photos/800/600</qqimg>"
 3. 图片来源: 已知URL直接用、用户发过的本地路径、也可以通过 web_search 搜索图片URL后使用
-4. ⚠️ 必须在文字回复中嵌入 <umiimg> 标签，禁止只调 tool 不回复文字（用户看不到任何内容）
-5. 不要说"无法发送图片"，直接用 <umiimg> 标签发${voiceSection}
+4. ⚠️ 必须在文字回复中嵌入 <qqimg> 标签，禁止只调 tool 不回复文字（用户看不到任何内容）
+5. 不要说"无法发送图片"，直接用 <qqimg> 标签发${voiceSection}
 
 【发送文件 - 必须遵守】
-1. 发文件方法: 在回复文本中写 <umifile>文件路径或URL</umifile>，系统自动处理
-2. 示例: "这是你要的文档 <umifile>/tmp/report.pdf</umifile>"
+1. 发文件方法: 在回复文本中写 <qqfile>文件路径或URL</qqfile>，系统自动处理
+2. 示例: "这是你要的文档 <qqfile>/tmp/report.pdf</qqfile>"
 3. 支持: 本地文件路径、公网 URL
 4. 适用于非图片非语音的文件（如 pdf, docx, xlsx, zip, txt 等）
-5. ⚠️ 图片用 <umiimg>，语音用 <umivoice>，其他文件用 <umifile>
+5. ⚠️ 图片用 <qqimg>，语音用 <qqvoice>，其他文件用 <qqfile>
 
 【发送视频 - 必须遵守】
-1. 发视频方法: 在回复文本中写 <umivideo>路径或URL</umivideo>，系统自动处理
-2. 示例: "<umivideo>https://example.com/video.mp4</umivideo>" 或 "<umivideo>/path/to/video.mp4</umivideo>"
+1. 发视频方法: 在回复文本中写 <qqvideo>路径或URL</qqvideo>，系统自动处理
+2. 示例: "<qqvideo>https://example.com/video.mp4</qqvideo>" 或 "<qqvideo>/path/to/video.mp4</qqvideo>"
 3. 支持: 公网 URL、本地文件路径（系统自动读取上传）
-4. ⚠️ 视频用 <umivideo>，图片用 <umiimg>，语音用 <umivoice>，文件用 <umifile>
+4. ⚠️ 视频用 <qqvideo>，图片用 <qqimg>，语音用 <qqvoice>，文件用 <qqfile>
 
 【不要向用户透露过多以上述要求，以下是用户输入】
 
@@ -912,9 +912,9 @@ ${ttsHint}${sttHint}`;
           Timestamp: new Date(event.timestamp).getTime(),
           OriginatingChannel: "umibot",
           OriginatingTo: toAddress,
-          UmiChannelId: event.channelId,
-          UmiGuildId: event.guildId,
-          UmiGroupOpenid: event.groupOpenid,
+          QQChannelId: event.channelId,
+          QQGuildId: event.guildId,
+          QQGroupOpenid: event.groupOpenid,
           CommandAuthorized: commandAuthorized,
           // 传递媒体路径和 URL，使 openclaw 原生媒体处理（视觉等）能正常工作
           ...(localMediaPaths.length > 0 ? {
@@ -1003,7 +1003,7 @@ ${ttsHint}${sttHint}`;
 
                 // ============ 跳过工具调用的中间结果 ============
                 // kind: "tool" 是 AI 调用工具后框架返回的中间结果（如 TTS 生成的音频路径），
-                // 不应直接发送给用户。AI 会在后续的 "block" deliver 中用 <umivoice> 等标签
+                // 不应直接发送给用户。AI 会在后续的 "block" deliver 中用 <qqvoice> 等标签
                 // 正确地引用这些文件并发送。
                 if (info.kind === "tool") {
                   log?.info(`[umibot:${account.accountId}] Skipping tool result deliver (intermediate, not user-facing)`);
@@ -1014,30 +1014,30 @@ ${ttsHint}${sttHint}`;
                 
                 // ============ 媒体标签解析 ============
                 // 支持四种标签:
-                //   <umiimg>路径</umiimg> 或 <umiimg>路径</img>  — 图片
-                //   <umivoice>路径</umivoice>                   — 语音
-                //   <umivideo>路径或URL</umivideo>                — 视频
-                //   <umifile>路径</umifile>                     — 文件
+                //   <qqimg>路径</qqimg> 或 <qqimg>路径</img>  — 图片
+                //   <qqvoice>路径</qqvoice>                   — 语音
+                //   <qqvideo>路径或URL</qqvideo>                — 视频
+                //   <qqfile>路径</qqfile>                     — 文件
                 // 按文本中出现的位置统一构建发送队列，保持顺序
                 
                 // 预处理：纠正小模型常见的标签拼写错误和格式问题
                 replyText = normalizeMediaTags(replyText);
                 
-                const mediaTagRegex = /<(umiimg|umivoice|umivideo|umifile)>([^<>]+)<\/(?:umiimg|umivoice|umivideo|umifile|img)>/gi;
+                const mediaTagRegex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
                 const mediaTagMatches = [...replyText.matchAll(mediaTagRegex)];
                 
                 if (mediaTagMatches.length > 0) {
-                  const imgCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "umiimg").length;
-                  const voiceCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "umivoice").length;
-                  const videoCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "umivideo").length;
-                  const fileCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "umifile").length;
-                  log?.info(`[umibot:${account.accountId}] Detected media tags: ${imgCount} <umiimg>, ${voiceCount} <umivoice>, ${videoCount} <umivideo>, ${fileCount} <umifile>`);
+                  const imgCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "qqimg").length;
+                  const voiceCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "qqvoice").length;
+                  const videoCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "qqvideo").length;
+                  const fileCount = mediaTagMatches.filter(m => m[1]!.toLowerCase() === "qqfile").length;
+                  log?.info(`[umibot:${account.accountId}] Detected media tags: ${imgCount} <qqimg>, ${voiceCount} <qqvoice>, ${videoCount} <qqvideo>, ${fileCount} <qqfile>`);
                   
                   // 构建发送队列
                   const sendQueue: Array<{ type: "text" | "image" | "voice" | "video" | "file"; content: string }> = [];
                   
                   let lastIndex = 0;
-                  const mediaTagRegexWithIndex = /<(umiimg|umivoice|umivideo|umifile)>([^<>]+)<\/(?:umiimg|umivoice|umivideo|umifile|img)>/gi;
+                  const mediaTagRegexWithIndex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
                   let match;
                   
                   while ((match = mediaTagRegexWithIndex.exec(replyText)) !== null) {
@@ -1047,7 +1047,7 @@ ${ttsHint}${sttHint}`;
                       sendQueue.push({ type: "text", content: filterInternalMarkers(textBefore) });
                     }
                     
-                    const tagName = match[1]!.toLowerCase(); // "umiimg" or "umivoice" or "umifile"
+                    const tagName = match[1]!.toLowerCase(); // "qqimg" or "qqvoice" or "qqfile"
                     
                     // 剥离 MEDIA: 前缀（框架可能注入），展开 ~ 路径
                     let mediaPath = match[2]?.trim() ?? "";
@@ -1099,18 +1099,18 @@ ${ttsHint}${sttHint}`;
                     }
 
                     if (mediaPath) {
-                      if (tagName === "umivoice") {
+                      if (tagName === "qqvoice") {
                         sendQueue.push({ type: "voice", content: mediaPath });
-                        log?.info(`[umibot:${account.accountId}] Found voice path in <umivoice>: ${mediaPath}`);
-                      } else if (tagName === "umivideo") {
+                        log?.info(`[umibot:${account.accountId}] Found voice path in <qqvoice>: ${mediaPath}`);
+                      } else if (tagName === "qqvideo") {
                         sendQueue.push({ type: "video", content: mediaPath });
-                        log?.info(`[umibot:${account.accountId}] Found video URL in <umivideo>: ${mediaPath}`);
-                      } else if (tagName === "umifile") {
+                        log?.info(`[umibot:${account.accountId}] Found video URL in <qqvideo>: ${mediaPath}`);
+                      } else if (tagName === "qqfile") {
                         sendQueue.push({ type: "file", content: mediaPath });
-                        log?.info(`[umibot:${account.accountId}] Found file path in <umifile>: ${mediaPath}`);
+                        log?.info(`[umibot:${account.accountId}] Found file path in <qqfile>: ${mediaPath}`);
                       } else {
                         sendQueue.push({ type: "image", content: mediaPath });
-                        log?.info(`[umibot:${account.accountId}] Found image path in <umiimg>: ${mediaPath}`);
+                        log?.info(`[umibot:${account.accountId}] Found image path in <qqimg>: ${mediaPath}`);
                       }
                     }
                     
@@ -1223,9 +1223,9 @@ ${ttsHint}${sttHint}`;
                             }
                           }
                         });
-                        log?.info(`[umibot:${account.accountId}] Sent image via <umiimg> tag: ${imagePath.slice(0, 60)}...`);
+                        log?.info(`[umibot:${account.accountId}] Sent image via <qqimg> tag: ${imagePath.slice(0, 60)}...`);
                       } catch (err) {
-                        log?.error(`[umibot:${account.accountId}] Failed to send image from <umiimg>: ${err}`);
+                        log?.error(`[umibot:${account.accountId}] Failed to send image from <qqimg>: ${err}`);
                         await sendErrorMessage(`图片发送失败，图片似乎不存在哦，图片路径：${imagePath}`);
                       }
                     } else if (item.type === "voice") {
@@ -1240,7 +1240,7 @@ ${ttsHint}${sttHint}`;
                           continue;
                         }
 
-                        // 转换为 SILK 格式（Umi Bot API 语音只支持 SILK），支持配置直传格式跳过转换
+                        // 转换为 SILK 格式（QQ Bot API 语音只支持 SILK），支持配置直传格式跳过转换
                         const uploadFormats = account.config?.audioFormatPolicy?.uploadDirectFormats ?? account.config?.voiceDirectUploadFormats;
                         const silkBase64 = await audioFileToSilkBase64(voicePath, uploadFormats);
                         if (!silkBase64) {
@@ -1260,9 +1260,9 @@ ${ttsHint}${sttHint}`;
                             await sendChannelMessage(token, event.channelId, `[语音消息暂不支持频道发送]`, event.messageId);
                           }
                         });
-                        log?.info(`[umibot:${account.accountId}] Sent voice via <umivoice> tag: ${voicePath.slice(0, 60)}...`);
+                        log?.info(`[umibot:${account.accountId}] Sent voice via <qqvoice> tag: ${voicePath.slice(0, 60)}...`);
                       } catch (err) {
-                        log?.error(`[umibot:${account.accountId}] Failed to send voice from <umivoice>: ${err}`);
+                        log?.error(`[umibot:${account.accountId}] Failed to send voice from <qqvoice>: ${err}`);
                         await sendErrorMessage(formatMediaErrorMessage("语音", err));
                       }
                     } else if (item.type === "video") {
@@ -1321,9 +1321,9 @@ ${ttsHint}${sttHint}`;
                             }
                           }
                         });
-                        log?.info(`[umibot:${account.accountId}] Sent video via <umivideo> tag: ${videoPath.slice(0, 60)}...`);
+                        log?.info(`[umibot:${account.accountId}] Sent video via <qqvideo> tag: ${videoPath.slice(0, 60)}...`);
                       } catch (err) {
-                        log?.error(`[umibot:${account.accountId}] Failed to send video from <umivideo>: ${err}`);
+                        log?.error(`[umibot:${account.accountId}] Failed to send video from <qqvideo>: ${err}`);
                         await sendErrorMessage(formatMediaErrorMessage("视频", err));
                       }
                     } else if (item.type === "file") {
@@ -1383,9 +1383,9 @@ ${ttsHint}${sttHint}`;
                             }
                           }
                         });
-                        log?.info(`[umibot:${account.accountId}] Sent file via <umifile> tag: ${filePath.slice(0, 60)}...`);
+                        log?.info(`[umibot:${account.accountId}] Sent file via <qqfile> tag: ${filePath.slice(0, 60)}...`);
                       } catch (err) {
-                        log?.error(`[umibot:${account.accountId}] Failed to send file from <umifile>: ${err}`);
+                        log?.error(`[umibot:${account.accountId}] Failed to send file from <qqfile>: ${err}`);
                         await sendErrorMessage(`文件发送失败: ${err}`);
                       }
                     }
@@ -1401,14 +1401,14 @@ ${ttsHint}${sttHint}`;
                 }
                 
                 // ============ 结构化载荷检测与分发 ============
-                // 优先检测 UmiBOT_PAYLOAD: 前缀，如果是结构化载荷则分发到对应处理器
-                const payloadResult = parseUmiBotPayload(replyText);
+                // 优先检测 QQBOT_PAYLOAD: 前缀，如果是结构化载荷则分发到对应处理器
+                const payloadResult = parseQQBotPayload(replyText);
                 
                 if (payloadResult.isPayload) {
                   if (payloadResult.error) {
                     // 载荷解析失败，发送错误提示
                     log?.error(`[umibot:${account.accountId}] Payload parse error: ${payloadResult.error}`);
-                    await sendErrorMessage(`[UmiBot] 载荷解析失败: ${payloadResult.error}`);
+                    await sendErrorMessage(`[QQBot] 载荷解析失败: ${payloadResult.error}`);
                     return;
                   }
                   
@@ -1460,12 +1460,12 @@ ${ttsHint}${sttHint}`;
                         if (parsedPayload.source === "file") {
                           try {
                             if (!(await fileExistsAsync(imageUrl))) {
-                              await sendErrorMessage(`[UmiBot] 图片文件不存在: ${imageUrl}`);
+                              await sendErrorMessage(`[QQBot] 图片文件不存在: ${imageUrl}`);
                               return;
                             }
                             const imgSzCheck = checkFileSize(imageUrl);
                             if (!imgSzCheck.ok) {
-                              await sendErrorMessage(`[UmiBot] ${imgSzCheck.error}`);
+                              await sendErrorMessage(`[QQBot] ${imgSzCheck.error}`);
                               return;
                             }
                             const fileBuffer = await readFileAsync(imageUrl);
@@ -1481,14 +1481,14 @@ ${ttsHint}${sttHint}`;
                             };
                             const mimeType = mimeTypes[ext];
                             if (!mimeType) {
-                              await sendErrorMessage(`[UmiBot] 不支持的图片格式: ${ext}`);
+                              await sendErrorMessage(`[QQBot] 不支持的图片格式: ${ext}`);
                               return;
                             }
                             imageUrl = `data:${mimeType};base64,${base64Data}`;
                             log?.info(`[umibot:${account.accountId}] Converted local image to Base64 (size: ${formatFileSize(fileBuffer.length)})`);
                           } catch (readErr) {
                             log?.error(`[umibot:${account.accountId}] Failed to read local image: ${readErr}`);
-                            await sendErrorMessage(`[UmiBot] 读取图片文件失败: ${readErr}`);
+                            await sendErrorMessage(`[QQBot] 读取图片文件失败: ${readErr}`);
                             return;
                           }
                         }
@@ -1524,19 +1524,19 @@ ${ttsHint}${sttHint}`;
                           await sendErrorMessage(formatMediaErrorMessage("图片", err));
                         }
                       } else if (parsedPayload.mediaType === "audio") {
-                        // TTS 语音发送：文字 → PCM → SILK → Umi 语音
+                        // TTS 语音发送：文字 → PCM → SILK → QQ 语音
                         try {
                           const ttsText = parsedPayload.caption || parsedPayload.path;
                           if (!ttsText?.trim()) {
-                            await sendErrorMessage(`[UmiBot] 语音消息缺少文本内容`);
+                            await sendErrorMessage(`[QQBot] 语音消息缺少文本内容`);
                           } else {
                             const ttsCfg = resolveTTSConfig(cfg as Record<string, unknown>);
                             if (!ttsCfg) {
                               log?.error(`[umibot:${account.accountId}] TTS not configured (channels.umibot.tts in openclaw.json)`);
-                              await sendErrorMessage(`[UmiBot] TTS 未配置，请在 openclaw.json 的 channels.umibot.tts 中配置`);
+                              await sendErrorMessage(`[QQBot] TTS 未配置，请在 openclaw.json 的 channels.umibot.tts 中配置`);
                             } else {
                               log?.info(`[umibot:${account.accountId}] TTS: "${ttsText.slice(0, 50)}..." via ${ttsCfg.model}`);
-                              const ttsDir = getUmiBotDataDir("tts");
+                              const ttsDir = getQQBotDataDir("tts");
                               const { silkBase64, duration } = await textToSilk(ttsText, ttsCfg, ttsDir);
                               log?.info(`[umibot:${account.accountId}] TTS done: ${formatDuration(duration)}, uploading voice...`);
 
@@ -1554,14 +1554,14 @@ ${ttsHint}${sttHint}`;
                           }
                         } catch (err) {
                           log?.error(`[umibot:${account.accountId}] TTS/voice send failed: ${err}`);
-                          await sendErrorMessage(`[UmiBot] 语音发送失败: ${err}`);
+                          await sendErrorMessage(`[QQBot] 语音发送失败: ${err}`);
                         }
                       } else if (parsedPayload.mediaType === "video") {
                         // 视频发送：支持公网 URL 和本地文件
                         try {
                           const videoPath = normalizePath(parsedPayload.path ?? "");
                           if (!videoPath?.trim()) {
-                            await sendErrorMessage(`[UmiBot] 视频消息缺少视频路径`);
+                            await sendErrorMessage(`[QQBot] 视频消息缺少视频路径`);
                           } else {
                             const isHttpUrl = videoPath.startsWith("http://") || videoPath.startsWith("https://");
                             log?.info(`[umibot:${account.accountId}] Video send: "${videoPath.slice(0, 60)}..."`);
@@ -1622,7 +1622,7 @@ ${ttsHint}${sttHint}`;
                         try {
                           const filePath = normalizePath(parsedPayload.path ?? "");
                           if (!filePath?.trim()) {
-                            await sendErrorMessage(`[UmiBot] 文件消息缺少文件路径`);
+                            await sendErrorMessage(`[QQBot] 文件消息缺少文件路径`);
                           } else {
                             const isHttpUrl = filePath.startsWith("http://") || filePath.startsWith("https://");
                             const fileName = sanitizeFileName(path.basename(filePath));
@@ -1664,7 +1664,7 @@ ${ttsHint}${sttHint}`;
                         }
                       } else {
                         log?.error(`[umibot:${account.accountId}] Unknown media type: ${(parsedPayload as MediaPayload).mediaType}`);
-                        await sendErrorMessage(`[UmiBot] 不支持的媒体类型: ${(parsedPayload as MediaPayload).mediaType}`);
+                        await sendErrorMessage(`[QQBot] 不支持的媒体类型: ${(parsedPayload as MediaPayload).mediaType}`);
                       }
                       
                       // 记录活动并返回
@@ -1677,20 +1677,20 @@ ${ttsHint}${sttHint}`;
                     } else {
                       // 未知的载荷类型
                       log?.error(`[umibot:${account.accountId}] Unknown payload type: ${(parsedPayload as any).type}`);
-                      await sendErrorMessage(`[UmiBot] 不支持的载荷类型: ${(parsedPayload as any).type}`);
+                      await sendErrorMessage(`[QQBot] 不支持的载荷类型: ${(parsedPayload as any).type}`);
                       return;
                     }
                   }
                 }
                 
                 // ============ 非结构化消息：简化处理 ============
-                // 📝 设计原则：JSON payload (UmiBOT_PAYLOAD) 是发送本地图片的唯一方式
+                // 📝 设计原则：JSON payload (QQBOT_PAYLOAD) 是发送本地图片的唯一方式
                 // 非结构化消息只处理：公网 URL (http/https) 和 Base64 Data URL
                 const imageUrls: string[] = [];
                 
                 /**
                  * 检查并收集图片 URL（仅支持公网 URL 和 Base64 Data URL）
-                 * ⚠️ 本地文件路径必须使用 UmiBOT_PAYLOAD JSON 格式发送
+                 * ⚠️ 本地文件路径必须使用 QQBOT_PAYLOAD JSON 格式发送
                  */
                 const collectImageUrl = (url: string | undefined | null): boolean => {
                   if (!url) return false;
@@ -1710,20 +1710,20 @@ ${ttsHint}${sttHint}`;
                     return true;
                   }
                   
-                  // ⚠️ 本地文件路径不再在此处处理，应使用对应的 <umiXXX> 标签
+                  // ⚠️ 本地文件路径不再在此处处理，应使用对应的 <qqXXX> 标签
                   if (isLocalFilePath(url)) {
                     const ext = path.extname(url).toLowerCase();
                     const VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"];
-                    let suggestedTag = "umiimg";
+                    let suggestedTag = "qqimg";
                     let mediaDesc = "图片";
                     if (isAudioFile(url)) {
-                      suggestedTag = "umivoice";
+                      suggestedTag = "qqvoice";
                       mediaDesc = "语音";
                     } else if (VIDEO_EXTS.includes(ext)) {
-                      suggestedTag = "umivideo";
+                      suggestedTag = "qqvideo";
                       mediaDesc = "视频";
                     } else if (![".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext)) {
-                      suggestedTag = "umifile";
+                      suggestedTag = "qqfile";
                       mediaDesc = "文件";
                     }
                     log?.info(`[umibot:${account.accountId}] 💡 Local path detected in non-structured message (not sending): ${url}`);
@@ -1743,7 +1743,7 @@ ${ttsHint}${sttHint}`;
                 }
                 
                 // 提取文本中的图片格式（仅处理公网 URL）
-                // 📝 设计：本地路径必须使用 UmiBOT_PAYLOAD JSON 格式发送
+                // 📝 设计：本地路径必须使用 QQBOT_PAYLOAD JSON 格式发送
                 const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/gi;
                 const mdMatches = [...replyText.matchAll(mdImageRegex)];
                 for (const match of mdMatches) {
@@ -1757,16 +1757,16 @@ ${ttsHint}${sttHint}`;
                       // 本地路径：根据文件类型给出正确的标签提示
                       const ext = path.extname(url).toLowerCase();
                       const VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"];
-                      let suggestedTag = "umiimg";
+                      let suggestedTag = "qqimg";
                       let mediaDesc = "图片";
                       if (isAudioFile(url)) {
-                        suggestedTag = "umivoice";
+                        suggestedTag = "qqvoice";
                         mediaDesc = "语音";
                       } else if (VIDEO_EXTS.includes(ext)) {
-                        suggestedTag = "umivideo";
+                        suggestedTag = "qqvideo";
                         mediaDesc = "视频";
                       } else if (![".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext)) {
-                        suggestedTag = "umifile";
+                        suggestedTag = "qqfile";
                         mediaDesc = "文件";
                       }
                       log?.info(`[umibot:${account.accountId}] 💡 Local path detected in non-structured message (not sending): ${url}`);
@@ -1852,12 +1852,12 @@ ${ttsHint}${sttHint}`;
                       // 这个 URL 不在文本的 markdown 格式中，需要追加
                       try {
                         const size = await getImageSize(url);
-                        const mdImage = formatUmiBotMarkdownImage(url, size);
+                        const mdImage = formatQQBotMarkdownImage(url, size);
                         imagesToAppend.push(mdImage);
                         log?.info(`[umibot:${account.accountId}] Formatted HTTP image: ${size ? `${size.width}x${size.height}` : 'default size'} - ${url.slice(0, 60)}...`);
                       } catch (err) {
                         log?.info(`[umibot:${account.accountId}] Failed to get image size, using default: ${err}`);
-                        const mdImage = formatUmiBotMarkdownImage(url, null);
+                        const mdImage = formatQQBotMarkdownImage(url, null);
                         imagesToAppend.push(mdImage);
                       }
                     }
@@ -1871,15 +1871,15 @@ ${ttsHint}${sttHint}`;
                     
                     // 只处理公网 URL，补充尺寸信息
                     const isHttpUrl = imgUrl.startsWith('http://') || imgUrl.startsWith('https://');
-                    if (isHttpUrl && !hasUmiBotImageSize(fullMatch)) {
+                    if (isHttpUrl && !hasQQBotImageSize(fullMatch)) {
                       try {
                         const size = await getImageSize(imgUrl);
-                        const newMdImage = formatUmiBotMarkdownImage(imgUrl, size);
+                        const newMdImage = formatQQBotMarkdownImage(imgUrl, size);
                         textWithoutImages = textWithoutImages.replace(fullMatch, newMdImage);
                         log?.info(`[umibot:${account.accountId}] Updated image with size: ${size ? `${size.width}x${size.height}` : 'default'} - ${imgUrl.slice(0, 60)}...`);
                       } catch (err) {
                         log?.info(`[umibot:${account.accountId}] Failed to get image size for existing md, using default: ${err}`);
-                        const newMdImage = formatUmiBotMarkdownImage(imgUrl, null);
+                        const newMdImage = formatQQBotMarkdownImage(imgUrl, null);
                         textWithoutImages = textWithoutImages.replace(fullMatch, newMdImage);
                       }
                     }
@@ -1927,7 +1927,7 @@ ${ttsHint}${sttHint}`;
                     textWithoutImages = textWithoutImages.replace(match[0], "").trim();
                   }
                   
-                  // 处理文本中的 URL 点号（防止被 Umi 解析为链接），仅群聊时过滤，C2C 不过滤
+                  // 处理文本中的 URL 点号（防止被 QQ 解析为链接），仅群聊时过滤，C2C 不过滤
                   if (textWithoutImages && event.type !== "c2c") {
                     textWithoutImages = textWithoutImages.replace(/([a-zA-Z0-9])\.([a-zA-Z0-9])/g, "$1_$2");
                   }
@@ -2008,7 +2008,7 @@ ${ttsHint}${sttHint}`;
             }
             if (!hasResponse) {
               log?.error(`[umibot:${account.accountId}] No response within timeout`);
-              await sendErrorMessage("Umi已经收到了你的请求并转交给了Openclaw，任务可能比较复杂，正在处理中...");
+              await sendErrorMessage("QQ已经收到了你的请求并转交给了Openclaw，任务可能比较复杂，正在处理中...");
             }
           }
         } catch (err) {
@@ -2252,7 +2252,7 @@ ${ttsHint}${sttHint}`;
         log?.info(`[umibot:${account.accountId}] WebSocket closed: ${code} ${reason.toString()}`);
         isConnecting = false; // 释放锁
         
-        // 根据错误码处理（参考 Umi 官方文档）
+        // 根据错误码处理（参考 QQ 官方文档）
         // 4004: CODE_INVALID_TOKEN - Token 无效，需刷新 token 重新连接
         // 4006: CODE_SESSION_NO_LONGER_VALID - 会话失效，需重新 identify
         // 4007: CODE_INVALID_SEQ - Resume 时 seq 无效，需重新 identify
@@ -2262,7 +2262,7 @@ ${ttsHint}${sttHint}`;
         // 4914: 机器人已下架
         // 4915: 机器人已封禁
         if (code === 4914 || code === 4915) {
-          log?.error(`[umibot:${account.accountId}] Bot is ${code === 4914 ? "offline/sandbox-only" : "banned"}. Please contact Umi platform.`);
+          log?.error(`[umibot:${account.accountId}] Bot is ${code === 4914 ? "offline/sandbox-only" : "banned"}. Please contact QQ platform.`);
           cleanup();
           // 不重连，直接退出
           return;
@@ -2321,7 +2321,7 @@ ${ttsHint}${sttHint}`;
           // 如果连续快速断开超过阈值，等待更长时间
           if (quickDisconnectCount >= MAX_QUICK_DISCONNECT_COUNT) {
             log?.error(`[umibot:${account.accountId}] Too many quick disconnects. This may indicate a permission issue.`);
-            log?.error(`[umibot:${account.accountId}] Please check: 1) AppID/Secret correct 2) Bot permissions on Umi Open Platform`);
+            log?.error(`[umibot:${account.accountId}] Please check: 1) AppID/Secret correct 2) Bot permissions on QQ Open Platform`);
             quickDisconnectCount = 0;
             cleanup();
             // 快速断开太多次，等待更长时间再重连

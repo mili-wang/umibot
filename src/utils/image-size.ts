@@ -1,8 +1,8 @@
 /**
  * 图片尺寸工具
- * 用于获取图片尺寸，生成 UmiBot 的 markdown 图片格式
+ * 用于获取图片尺寸，生成 QQBot 的 markdown 图片格式
  * 
- * UmiBot markdown 图片格式: ![#宽px #高px](url)
+ * QQBot markdown 图片格式: ![#宽px #高px](url)
  */
 
 import { Buffer } from "buffer";
@@ -163,7 +163,7 @@ export async function getImageSizeFromUrl(url: string, timeoutMs = 5000): Promis
       signal: controller.signal,
       headers: {
         "Range": "bytes=0-65535",
-        "User-Agent": "UmiBot-Image-Size-Detector/1.0",
+        "User-Agent": "QQBot-Image-Size-Detector/1.0",
       },
     });
     
@@ -233,31 +233,31 @@ export async function getImageSize(source: string): Promise<ImageSize | null> {
 }
 
 /**
- * 生成 UmiBot markdown 图片格式
+ * 生成 QQBot markdown 图片格式
  * 格式: ![#宽px #高px](url)
  * 
  * @param url - 图片 URL
  * @param size - 图片尺寸，如果为 null 则使用默认尺寸
- * @returns UmiBot markdown 图片字符串
+ * @returns QQBot markdown 图片字符串
  */
-export function formatUmiBotMarkdownImage(url: string, size: ImageSize | null): string {
+export function formatQQBotMarkdownImage(url: string, size: ImageSize | null): string {
   const { width, height } = size ?? DEFAULT_IMAGE_SIZE;
   return `![#${width}px #${height}px](${url})`;
 }
 
 /**
- * 检查 markdown 图片是否已经包含 UmiBot 格式的尺寸信息
+ * 检查 markdown 图片是否已经包含 QQBot 格式的尺寸信息
  * 格式: ![#宽px #高px](url)
  */
-export function hasUmiBotImageSize(markdownImage: string): boolean {
+export function hasQQBotImageSize(markdownImage: string): boolean {
   return /!\[#\d+px\s+#\d+px\]/.test(markdownImage);
 }
 
 /**
- * 从已有的 UmiBot 格式 markdown 图片中提取尺寸
+ * 从已有的 QQBot 格式 markdown 图片中提取尺寸
  * 格式: ![#宽px #高px](url)
  */
-export function extractUmiBotImageSize(markdownImage: string): ImageSize | null {
+export function extractQQBotImageSize(markdownImage: string): ImageSize | null {
   const match = markdownImage.match(/!\[#(\d+)px\s+#(\d+)px\]/);
   if (match) {
     return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) };

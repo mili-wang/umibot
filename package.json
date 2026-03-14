@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "bin",
     "src",
     "skills",
     "index.ts",
@@ -60,6 +61,7 @@
     "moltbot": "*",
     "openclaw": "*"
   },
+  "homepage": "https://github.com/mili-wang/umibot",
   "bundleDependencies": [
     "mpg123-decoder",
     "silk-wasm",

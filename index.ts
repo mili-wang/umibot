@@ -1,8 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
-import { umibotPlugin } from "./src/channel.js";
-import { setUmiBotRuntime } from "./src/runtime.js";
+import { qqbotPlugin } from "./src/channel.js";
+import { setQQBotRuntime } from "./src/runtime.js";
 
 const plugin = {
   id: "umibot",
@@ -10,16 +10,16 @@ const plugin = {
   description: "Umi Bot channel plugin",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
-    setUmiBotRuntime(api.runtime);
-    api.registerChannel({ plugin: umibotPlugin });
+    setQQBotRuntime(api.runtime);
+    api.registerChannel({ plugin: qqbotPlugin });
   },
 };
 
 export default plugin;
 
-export { umibotPlugin } from "./src/channel.js";
-export { setUmiBotRuntime, getUmiBotRuntime } from "./src/runtime.js";
-export { umibotOnboardingAdapter } from "./src/onboarding.js";
+export { qqbotPlugin } from "./src/channel.js";
+export { setQQBotRuntime, getQQBotRuntime } from "./src/runtime.js";
+export { qqbotOnboardingAdapter } from "./src/onboarding.js";
 export * from "./src/types.js";
 export * from "./src/api.js";
 export * from "./src/config.js";

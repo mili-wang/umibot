@@ -6,12 +6,12 @@ import {
   setAccountEnabledInConfigSection,
 } from "openclaw/plugin-sdk";
 
-import type { ResolvedUmiBotAccount } from "./types.js";
-import { DEFAULT_ACCOUNT_ID, listUmiBotAccountIds, resolveUmiBotAccount, applyUmiBotAccountConfig, resolveDefaultUmiBotAccountId } from "./config.js";
+import type { ResolvedQQBotAccount } from "./types.js";
+import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, applyQQBotAccountConfig, resolveDefaultQQBotAccountId } from "./config.js";
 import { sendText, sendMedia } from "./outbound.js";
 import { startGateway } from "./gateway.js";
-import { umibotOnboardingAdapter } from "./onboarding.js";
-import { getUmiBotRuntime } from "./runtime.js";
+import { qqbotOnboardingAdapter } from "./onboarding.js";
+import { getQQBotRuntime } from "./runtime.js";
 
 /**
  * 简单的文本分块函数
@@ -47,14 +47,14 @@ function chunkText(text: string, limit: number): string[] {
   return chunks;
 }
 
-export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
+export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   id: "umibot",
   meta: {
     id: "umibot",
-    label: "Umi Bot",
-    selectionLabel: "Umi Bot",
+    label: "QQ Bot",
+    selectionLabel: "QQ Bot",
     docsPath: "/docs/channels/umibot",
-    blurb: "Connect to Umi via official Umi Bot API",
+    blurb: "Connect to QQ via official QQ Bot API",
     order: 50,
   },
   capabilities: {
@@ -70,21 +70,21 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
   },
   reload: { configPrefixes: ["channels.umibot"] },
   // CLI onboarding wizard
-  onboarding: umibotOnboardingAdapter,
+  onboarding: qqbotOnboardingAdapter,
 
   config: {
     listAccountIds: (cfg) => {
-      const ids = listUmiBotAccountIds(cfg);
+      const ids = listQQBotAccountIds(cfg);
       console.log(`[umibot:channel] listAccountIds: ${JSON.stringify(ids)}`);
       return ids;
     },
     resolveAccount: (cfg, accountId) => {
-      const account = resolveUmiBotAccount(cfg, accountId);
+      const account = resolveQQBotAccount(cfg, accountId);
       console.log(`[umibot:channel] resolveAccount: input=${accountId} → resolved=${account.accountId}, appId=${account.appId}, enabled=${account.enabled}`);
       return account;
     },
     defaultAccountId: (cfg) => {
-      const id = resolveDefaultUmiBotAccountId(cfg);
+      const id = resolveDefaultQQBotAccountId(cfg);
       console.log(`[umibot:channel] defaultAccountId: ${id}`);
       return id;
     },
@@ -115,7 +115,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
     }),
     // 关键：解析 allowFrom 配置，用于命令授权
     resolveAllowFrom: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) => {
-      const account = resolveUmiBotAccount(cfg, accountId);
+      const account = resolveQQBotAccount(cfg, accountId);
       const allowFrom = account.config?.allowFrom ?? [];
       console.log(`[umibot] resolveAllowFrom: accountId=${accountId}, allowFrom=${JSON.stringify(allowFrom)}`);
       return allowFrom.map((entry: string | number) => String(entry));
@@ -126,7 +126,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
         .map((entry: string | number) => String(entry).trim())
         .filter(Boolean)
         .map((entry: string) => entry.replace(/^umibot:/i, ""))
-        .map((entry: string) => entry.toUpperCase()), // Umi openid 是大写的
+        .map((entry: string) => entry.toUpperCase()), // QQ openid 是大写的
   },
   setup: {
     // 新增：规范化账户 ID
@@ -141,7 +141,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
       }),
     validateInput: ({ input }) => {
       if (!input.token && !input.tokenFile && !input.useEnv) {
-        return "UmiBot requires --token (format: appId:clientSecret) or --use-env";
+        return "QQBot requires --token (format: appId:clientSecret) or --use-env";
       }
       return null;
     },
@@ -157,7 +157,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
         }
       }
 
-      return applyUmiBotAccountConfig(cfg, accountId, {
+      return applyQQBotAccountConfig(cfg, accountId, {
         appId,
         clientSecret,
         clientSecretFile: input.tokenFile,
@@ -189,7 +189,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
       }
 
       // 检查是否是纯 openid（32位十六进制，不带连字符）
-      // Umi Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
+      // QQ Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
       const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
       if (openIdHexPattern.test(id)) {
         return { ok: true, to: `umibot:c2c:${id}` };
@@ -202,15 +202,15 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
       }
 
       // 不认识的格式
-      return { ok: false, error: "无法识别的目标格式" };
+      return { ok: false, error: "Unrecognized target format" };
     },
     /**
      * 目标解析器配置
-     * 用于判断一个目标 ID 是否看起来像 Umi Bot 的格式
+     * 用于判断一个目标 ID 是否看起来像 QQ Bot 的格式
      */
     targetResolver: {
       /**
-       * 判断目标 ID 是否可能是 Umi Bot 格式
+       * 判断目标 ID 是否可能是 QQ Bot 格式
        * 支持以下格式：
        * - umibot:c2c:xxx
        * - umibot:group:xxx  
@@ -237,7 +237,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
         const openIdPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
         return openIdPattern.test(id);
       },
-      hint: "Umi Bot 目标格式: umibot:c2c:openid (私聊) 或 umibot:group:groupid (群聊)",
+      hint: "QQ Bot 目标格式: umibot:c2c:openid (私聊) 或 umibot:group:groupid (群聊)",
     },
   },
   outbound: {
@@ -248,7 +248,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
     sendText: async ({ to, text, accountId, replyToId, cfg }) => {
       console.log(`[umibot:channel] sendText called — accountId=${accountId}, to=${to}, replyToId=${replyToId}, text.length=${text?.length ?? 0}`);
       console.log(`[umibot:channel] sendText text preview: ${text?.slice(0, 100)}${(text?.length ?? 0) > 100 ? "..." : ""}`);
-      const account = resolveUmiBotAccount(cfg, accountId);
+      const account = resolveQQBotAccount(cfg, accountId);
       console.log(`[umibot:channel] sendText resolved account: id=${account.accountId}, appId=${account.appId}, enabled=${account.enabled}`);
       const result = await sendText({ to, text, accountId, replyToId, account });
       console.log(`[umibot:channel] sendText result: messageId=${result.messageId}, error=${result.error ?? "none"}`);
@@ -260,7 +260,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
     },
     sendMedia: async ({ to, text, mediaUrl, accountId, replyToId, cfg }) => {
       console.log(`[umibot:channel] sendMedia called — accountId=${accountId}, to=${to}, replyToId=${replyToId}, mediaUrl=${mediaUrl?.slice(0, 80)}, text.length=${text?.length ?? 0}`);
-      const account = resolveUmiBotAccount(cfg, accountId);
+      const account = resolveQQBotAccount(cfg, accountId);
       console.log(`[umibot:channel] sendMedia resolved account: id=${account.accountId}, appId=${account.appId}, enabled=${account.enabled}`);
       const result = await sendMedia({ to, text: text ?? "", mediaUrl: mediaUrl ?? "", accountId, replyToId, account });
       console.log(`[umibot:channel] sendMedia result: messageId=${result.messageId}, error=${result.error ?? "none"}`);
@@ -304,12 +304,12 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
     // 新增：登出账户（清除配置中的凭证）
     logoutAccount: async ({ accountId, cfg }) => {
       const nextCfg = { ...cfg } as OpenClawConfig;
-      const nextUmiBot = cfg.channels?.umibot ? { ...cfg.channels.umibot } : undefined;
+      const nextQQBot = cfg.channels?.umibot ? { ...cfg.channels.umibot } : undefined;
       let cleared = false;
       let changed = false;
 
-      if (nextUmiBot) {
-        const umibot = nextUmiBot as Record<string, unknown>;
+      if (nextQQBot) {
+        const umibot = nextQQBot as Record<string, unknown>;
         if (accountId === DEFAULT_ACCOUNT_ID && umibot.clientSecret) {
           delete umibot.clientSecret;
           cleared = true;
@@ -330,16 +330,16 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
         }
       }
 
-      if (changed && nextUmiBot) {
-        nextCfg.channels = { ...nextCfg.channels, umibot: nextUmiBot };
-        const runtime = getUmiBotRuntime();
+      if (changed && nextQQBot) {
+        nextCfg.channels = { ...nextCfg.channels, umibot: nextQQBot };
+        const runtime = getQQBotRuntime();
         const configApi = runtime.config as { writeConfigFile: (cfg: OpenClawConfig) => Promise<void> };
         await configApi.writeConfigFile(nextCfg);
       }
 
-      const resolved = resolveUmiBotAccount(changed ? nextCfg : cfg, accountId);
+      const resolved = resolveQQBotAccount(changed ? nextCfg : cfg, accountId);
       const loggedOut = resolved.secretSource === "none";
-      const envToken = Boolean(process.env.UmiBOT_CLIENT_SECRET);
+      const envToken = Boolean(process.env.QQBOT_CLIENT_SECRET);
 
       return { ok: true, cleared, envToken, loggedOut };
     },
@@ -363,7 +363,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedUmiBotAccount> = {
       lastConnectedAt: snapshot.lastConnectedAt ?? null,
       lastError: snapshot.lastError ?? null,
     }),
-    buildAccountSnapshot: ({ account, runtime }: { account?: ResolvedUmiBotAccount; runtime?: Record<string, unknown> }) => ({
+    buildAccountSnapshot: ({ account, runtime }: { account?: ResolvedQQBotAccount; runtime?: Record<string, unknown> }) => ({
       accountId: account?.accountId ?? DEFAULT_ACCOUNT_ID,
       name: account?.name,
       enabled: account?.enabled ?? false,

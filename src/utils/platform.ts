@@ -60,7 +60,7 @@ export function getHomeDir(): string {
  * 获取 .openclaw/umibot 下的子目录路径，并自动创建
  * 替代各文件中分散的 path.join(HOME, ".openclaw", "umibot", ...)
  */
-export function getUmiBotDataDir(...subPaths: string[]): string {
+export function getQQBotDataDir(...subPaths: string[]): string {
   const dir = path.join(getHomeDir(), ".openclaw", "umibot", ...subPaths);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -115,11 +115,11 @@ export function normalizePath(p: string): string {
 // ============ 文件名 UTF-8 规范化 ============
 
 /**
- * 规范化文件名为 Umi Bot API 要求的 UTF-8 编码格式
+ * 规范化文件名为 QQ Bot API 要求的 UTF-8 编码格式
  *
  * 问题场景:
  * - macOS HFS+/APFS 文件系统使用 NFD（Unicode 分解形式）存储文件名，
- *   例如「中文.txt」被分解为多个码点，Umi Bot API 可能拒绝
+ *   例如「中文.txt」被分解为多个码点，QQ Bot API 可能拒绝
  * - 文件名可能包含 API 不接受的特殊控制字符
  * - URL 路径中可能包含 percent-encoded 的文件名需要解码
  *
@@ -335,7 +335,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   const nodeVersion = process.version;
   const homeDir = getHomeDir();
   const tempDir = getTempDir();
-  const dataDir = getUmiBotDataDir();
+  const dataDir = getQQBotDataDir();
 
   // 检测 ffmpeg
   const ffmpegPath = await detectFfmpeg();
@@ -352,7 +352,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   // 检测 silk-wasm
   const silkWasm = await checkSilkWasmAvailable();
   if (!silkWasm) {
-    warnings.push("⚠️ silk-wasm 不可用。Umi 语音消息的收发将无法工作。请确认 Node.js 版本 >= 16 且 WASM 支持正常");
+    warnings.push("⚠️ silk-wasm 不可用。QQ 语音消息的收发将无法工作。请确认 Node.js 版本 >= 16 且 WASM 支持正常");
   }
 
   // 检查数据目录可写性
@@ -368,7 +368,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   if (isWindows()) {
     // 检查路径中是否有中文或空格（可能导致某些工具异常）
     if (/[\u4e00-\u9fa5]/.test(homeDir) || homeDir.includes(" ")) {
-      warnings.push(`⚠️ 用户目录包含中文或空格: ${homeDir}。某些工具可能无法正常工作，建议设置 UmiBOT_DATA_DIR 环境变量指定纯英文路径`);
+      warnings.push(`⚠️ 用户目录包含中文或空格: ${homeDir}。某些工具可能无法正常工作，建议设置 QQBOT_DATA_DIR 环境变量指定纯英文路径`);
     }
   }
 
@@ -385,7 +385,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   };
 
   // 打印诊断报告
-  console.log("=== UmiBot 环境诊断 ===");
+  console.log("=== QQBot 环境诊断 ===");
   console.log(`  平台: ${platform} (${arch})`);
   console.log(`  Node: ${nodeVersion}`);
   console.log(`  主目录: ${homeDir}`);

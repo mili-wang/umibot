@@ -27,10 +27,10 @@ export interface KnownUser {
   interactionCount: number;
 }
 
-import { getUmiBotDataDir } from "./utils/platform.js";
+import { getQQBotDataDir } from "./utils/platform.js";
 
 // 存储文件路径
-const KNOWN_USERS_DIR = getUmiBotDataDir("data");
+const KNOWN_USERS_DIR = getQQBotDataDir("data");
 const KNOWN_USERS_FILE = path.join(KNOWN_USERS_DIR, "known-users.json");
 
 // 内存缓存

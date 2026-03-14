@@ -1,5 +1,5 @@
 /**
- * Umi Bot 主动发送消息模块
+ * QQ Bot 主动发送消息模块
  * 
  * 该模块提供以下能力：
  * 1. 记录已知用户（曾与机器人交互过的用户）
@@ -9,7 +9,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ResolvedUmiBotAccount } from "./types.js";
+import type { ResolvedQQBotAccount } from "./types.js";
 
 // ============ 类型定义（本地） ============
 
@@ -63,7 +63,7 @@ import {
   sendC2CImageMessage,
   sendGroupImageMessage,
 } from "./api.js";
-import { resolveUmiBotAccount } from "./config.js";
+import { resolveQQBotAccount } from "./config.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
 // ============ 用户存储管理 ============
@@ -72,9 +72,9 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
  * 已知用户存储
  * 使用简单的 JSON 文件存储，保存在 .openclaw/umibot 目录下
  */
-import { getUmiBotDataDir } from "./utils/platform.js";
+import { getQQBotDataDir } from "./utils/platform.js";
 
-const STORAGE_DIR = getUmiBotDataDir("data");
+const STORAGE_DIR = getQQBotDataDir("data");
 const KNOWN_USERS_FILE = path.join(STORAGE_DIR, "known-users.json");
 
 // 内存缓存
@@ -304,12 +304,12 @@ export async function sendProactive(
   const { to, text, type = "c2c", imageUrl, accountId = "default" } = options;
   
   // 解析账户配置
-  const account = resolveUmiBotAccount(cfg, accountId);
+  const account = resolveQQBotAccount(cfg, accountId);
   
   if (!account.appId || !account.clientSecret) {
     return {
       success: false,
-      error: "UmiBot not configured (missing appId or clientSecret)",
+      error: "QQBot not configured (missing appId or clientSecret)",
     };
   }
   
@@ -474,7 +474,7 @@ export async function broadcastMessage(
  * @param type - 消息类型
  */
 export async function sendProactiveMessageDirect(
-  account: ResolvedUmiBotAccount,
+  account: ResolvedQQBotAccount,
   to: string,
   text: string,
   type: "c2c" | "group" = "c2c"
@@ -482,7 +482,7 @@ export async function sendProactiveMessageDirect(
   if (!account.appId || !account.clientSecret) {
     return {
       success: false,
-      error: "UmiBot not configured (missing appId or clientSecret)",
+      error: "QQBot not configured (missing appId or clientSecret)",
     };
   }
   

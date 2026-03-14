@@ -2,13 +2,13 @@ import type { PluginRuntime } from "openclaw/plugin-sdk";
 
 let runtime: PluginRuntime | null = null;
 
-export function setUmiBotRuntime(next: PluginRuntime) {
+export function setQQBotRuntime(next: PluginRuntime) {
   runtime = next;
 }
 
-export function getUmiBotRuntime(): PluginRuntime {
+export function getQQBotRuntime(): PluginRuntime {
   if (!runtime) {
-    throw new Error("UmiBot runtime not initialized");
+    throw new Error("QQBot runtime not initialized");
   }
   return runtime;
 }

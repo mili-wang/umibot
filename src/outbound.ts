@@ -1,9 +1,9 @@
 /**
- * Umi Bot 消息发送模块
+ * QQ Bot 消息发送模块
  */
 
 import * as path from "path";
-import type { ResolvedUmiBotAccount } from "./types.js";
+import type { ResolvedQQBotAccount } from "./types.js";
 import { decodeCronPayload } from "./utils/payload.js";
 import {
   getAccessToken, 
@@ -158,7 +158,7 @@ export interface OutboundContext {
   text: string;
   accountId?: string | null;
   replyToId?: string | null;
-  account: ResolvedUmiBotAccount;
+  account: ResolvedQQBotAccount;
 }
 
 export interface MediaOutboundContext extends OutboundContext {
@@ -239,7 +239,7 @@ function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: strin
  * 注意：
  * 1. 主动消息（无 replyToId）必须有消息内容，不支持流式发送
  * 2. 当被动回复不可用（超期或超过次数）时，自动降级为主动消息
- * 3. 支持 <umiimg>路径</umiimg> 或 <umiimg>路径</img> 格式发送图片
+ * 3. 支持 <qqimg>路径</qqimg> 或 <qqimg>路径</img> 格式发送图片
  */
 export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
   const { to, account } = ctx;
@@ -274,15 +274,15 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
 
   // ============ 媒体标签检测与处理 ============
   // 支持四种标签:
-  //   <umiimg>路径</umiimg> 或 <umiimg>路径</img>  — 图片
-  //   <umivoice>路径</umivoice>                   — 语音
-  //   <umivideo>路径或URL</umivideo>                — 视频
-  //   <umifile>路径</umifile>                     — 文件
+  //   <qqimg>路径</qqimg> 或 <qqimg>路径</img>  — 图片
+  //   <qqvoice>路径</qqvoice>                   — 语音
+  //   <qqvideo>路径或URL</qqvideo>                — 视频
+  //   <qqfile>路径</qqfile>                     — 文件
   
   // 预处理：纠正小模型常见的标签拼写错误和格式问题
   text = normalizeMediaTags(text);
   
-  const mediaTagRegex = /<(umiimg|umivoice|umivideo|umifile)>([^<>]+)<\/(?:umiimg|umivoice|umivideo|umifile|img)>/gi;
+  const mediaTagRegex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
   const mediaTagMatches = text.match(mediaTagRegex);
   
   if (mediaTagMatches && mediaTagMatches.length > 0) {
@@ -292,7 +292,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
     const sendQueue: Array<{ type: "text" | "image" | "voice" | "video" | "file"; content: string }> = [];
     
     let lastIndex = 0;
-    const mediaTagRegexWithIndex = /<(umiimg|umivoice|umivideo|umifile)>([^<>]+)<\/(?:umiimg|umivoice|umivideo|umifile|img)>/gi;
+    const mediaTagRegexWithIndex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
     let match;
     
     while ((match = mediaTagRegexWithIndex.exec(text)) !== null) {
@@ -302,7 +302,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
         sendQueue.push({ type: "text", content: textBefore });
       }
       
-      const tagName = match[1]!.toLowerCase(); // "umiimg" or "umivoice" or "umifile"
+      const tagName = match[1]!.toLowerCase(); // "qqimg" or "qqvoice" or "qqfile"
       
       // 剥离 MEDIA: 前缀（框架可能注入），展开 ~ 路径
       let mediaPath = match[2]?.trim() ?? "";
@@ -354,18 +354,18 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
       }
 
       if (mediaPath) {
-        if (tagName === "umivoice") {
+        if (tagName === "qqvoice") {
           sendQueue.push({ type: "voice", content: mediaPath });
-          console.log(`[umibot] sendText: Found voice path in <umivoice>: ${mediaPath}`);
-        } else if (tagName === "umivideo") {
+          console.log(`[umibot] sendText: Found voice path in <qqvoice>: ${mediaPath}`);
+        } else if (tagName === "qqvideo") {
           sendQueue.push({ type: "video", content: mediaPath });
-          console.log(`[umibot] sendText: Found video URL in <umivideo>: ${mediaPath}`);
-        } else if (tagName === "umifile") {
+          console.log(`[umibot] sendText: Found video URL in <qqvideo>: ${mediaPath}`);
+        } else if (tagName === "qqfile") {
           sendQueue.push({ type: "file", content: mediaPath });
-          console.log(`[umibot] sendText: Found file path in <umifile>: ${mediaPath}`);
+          console.log(`[umibot] sendText: Found file path in <qqfile>: ${mediaPath}`);
         } else {
           sendQueue.push({ type: "image", content: mediaPath });
-          console.log(`[umibot] sendText: Found image path in <umiimg>: ${mediaPath}`);
+          console.log(`[umibot] sendText: Found image path in <qqimg>: ${mediaPath}`);
         }
       }
       
@@ -382,7 +382,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
     
     // 按顺序发送
     if (!account.appId || !account.clientSecret) {
-      return { channel: "umibot", error: "UmiBot not configured (missing appId or clientSecret)" };
+      return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
     }
     
     const accessToken = await getAccessToken(account.appId, account.clientSecret);
@@ -468,7 +468,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
             const result = await sendChannelMessage(accessToken, target.id, `![](${imagePath})`, replyToId ?? undefined);
             lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
           }
-          console.log(`[umibot] sendText: Sent image via <umiimg> tag: ${imagePath.slice(0, 60)}...`);
+          console.log(`[umibot] sendText: Sent image via <qqimg> tag: ${imagePath.slice(0, 60)}...`);
         } else if (item.type === "voice") {
           // 发送语音文件
           const voicePath = item.content;
@@ -488,7 +488,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
             continue;
           }
 
-          // 转换为 SILK 格式（Umi Bot API 语音只支持 SILK）
+          // 转换为 SILK 格式（QQ Bot API 语音只支持 SILK）
           const silkBase64 = await audioFileToSilkBase64(voicePath);
           if (!silkBase64) {
             const ext = path.extname(voicePath).toLowerCase();
@@ -514,7 +514,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
             const result = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
             lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
           }
-          console.log(`[umibot] sendText: Sent voice via <umivoice> tag: ${voicePath.slice(0, 60)}...`);
+          console.log(`[umibot] sendText: Sent voice via <qqvoice> tag: ${voicePath.slice(0, 60)}...`);
         } else if (item.type === "video") {
           // 发送视频（支持公网 URL 和本地文件）
           const videoPath = item.content;
@@ -569,7 +569,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
               lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
             }
           }
-          console.log(`[umibot] sendText: Sent video via <umivideo> tag: ${videoPath.slice(0, 60)}...`);
+          console.log(`[umibot] sendText: Sent video via <qqvideo> tag: ${videoPath.slice(0, 60)}...`);
         } else if (item.type === "file") {
           // 发送文件
           const filePath = item.content;
@@ -625,7 +625,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
               lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
             }
           }
-          console.log(`[umibot] sendText: Sent file via <umifile> tag: ${filePath.slice(0, 60)}...`);
+          console.log(`[umibot] sendText: Sent file via <qqfile> tag: ${filePath.slice(0, 60)}...`);
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -655,7 +655,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
   }
 
   if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UmiBot not configured (missing appId or clientSecret)" };
+    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
   }
 
   try {
@@ -709,14 +709,14 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
  * @param text - 消息内容
  */
 export async function sendProactiveMessage(
-  account: ResolvedUmiBotAccount,
+  account: ResolvedQQBotAccount,
   to: string,
   text: string
 ): Promise<OutboundResult> {
   const timestamp = new Date().toISOString();
   
   if (!account.appId || !account.clientSecret) {
-    const errorMsg = "UmiBot not configured (missing appId or clientSecret)";
+    const errorMsg = "QQBot not configured (missing appId or clientSecret)";
     console.error(`[${timestamp}] [umibot] sendProactiveMessage: ${errorMsg}`);
     return { channel: "umibot", error: errorMsg };
   }
@@ -803,7 +803,7 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
   const mediaUrl = normalizePath(ctx.mediaUrl);
 
   if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UmiBot not configured (missing appId or clientSecret)" };
+    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
   }
 
   if (!mediaUrl) {
@@ -949,7 +949,7 @@ async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult>
   }
 
   try {
-    // 尝试转换为 SILK 格式（Umi 语音要求 SILK 格式），支持配置直传格式跳过转换
+    // 尝试转换为 SILK 格式（QQ 语音要求 SILK 格式），支持配置直传格式跳过转换
     const directFormats = account.config?.audioFormatPolicy?.uploadDirectFormats ?? account.config?.voiceDirectUploadFormats;
     const silkBase64 = await audioFileToSilkBase64(mediaUrl, directFormats);
     if (!silkBase64) {
@@ -1034,7 +1034,7 @@ async function sendVideoUrl(ctx: MediaOutboundContext): Promise<OutboundResult> 
   console.log(`[umibot] sendVideoUrl: ${mediaUrl}`);
 
   if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UmiBot not configured (missing appId or clientSecret)" };
+    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
   }
 
   try {
@@ -1083,7 +1083,7 @@ async function sendVideoFile(ctx: MediaOutboundContext): Promise<OutboundResult>
   console.log(`[umibot] sendVideoFile: ${mediaUrl}`);
 
   if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UmiBot not configured (missing appId or clientSecret)" };
+    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
   }
 
   try {
@@ -1147,7 +1147,7 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
   console.log(`[umibot] sendDocumentFile: ${mediaUrl}`);
 
   if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UmiBot not configured (missing appId or clientSecret)" };
+    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
   }
 
   const isHttpUrl = mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://");
@@ -1226,12 +1226,12 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
  * 发送 Cron 触发的消息
  * 
  * 当 OpenClaw cron 任务触发时，消息内容可能是：
- * 1. UmiBOT_CRON:{base64} 格式的结构化载荷 - 解码后根据 targetType 和 targetAddress 发送
+ * 1. QQBOT_CRON:{base64} 格式的结构化载荷 - 解码后根据 targetType 和 targetAddress 发送
  * 2. 普通文本 - 直接发送到指定目标
  * 
  * @param account - 账户配置
  * @param to - 目标地址（作为后备，如果载荷中没有指定）
- * @param message - 消息内容（可能是 UmiBOT_CRON: 格式或普通文本）
+ * @param message - 消息内容（可能是 QQBOT_CRON: 格式或普通文本）
  * @returns 发送结果
  * 
  * @example
@@ -1240,7 +1240,7 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
  * const result = await sendCronMessage(
  *   account,
  *   "user_openid",  // 后备地址
- *   "UmiBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs..."  // Base64 编码的载荷
+ *   "QQBOT_CRON:eyJ0eXBlIjoiY3Jvbl9yZW1pbmRlciIs..."  // Base64 编码的载荷
  * );
  * 
  * // 处理普通文本
@@ -1252,14 +1252,14 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
  * ```
  */
 export async function sendCronMessage(
-  account: ResolvedUmiBotAccount,
+  account: ResolvedQQBotAccount,
   to: string,
   message: string
 ): Promise<OutboundResult> {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] [umibot] sendCronMessage: to=${to}, message length=${message.length}`);
   
-  // 检测是否是 UmiBOT_CRON: 格式的结构化载荷
+  // 检测是否是 QQBOT_CRON: 格式的结构化载荷
   const cronResult = decodeCronPayload(message);
   
   if (cronResult.isCronPayload) {
