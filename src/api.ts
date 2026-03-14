@@ -183,7 +183,7 @@ export async function apiRequest<T = unknown>(
 ): Promise<T> {
   const url = `${API_BASE}${path}`;
   const headers: Record<string, string> = {
-    Authorization: `UmiBot ${accessToken}`,
+    Authorization: `QQBot ${accessToken}`,
     "Content-Type": "application/json",
   };
   
