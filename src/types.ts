@@ -91,6 +91,8 @@ export interface MessageAttachment {
  * C2C 消息事件
  */
 export interface C2CMessageEvent {
+  uuid: string;
+  room_id?: string;
   author: {
     id: string;
     union_openid: string;

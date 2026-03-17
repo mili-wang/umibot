@@ -6,8 +6,8 @@
 import { computeFileHash, getCachedFileInfo, setCachedFileInfo } from "./utils/upload-cache.js";
 import { sanitizeFileName } from "./utils/platform.js";
 
-const API_BASE = "https://api.sgroup.qq.com";
-const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken";
+const API_BASE = "https://testaest-v1.umi6.com";
+const TOKEN_URL = "https://testaest-v1.umi6.com/sn_vlrykm_soojj97v_dpjxey/api/lobster.auth/getAppToken";
 
 // 运行时配置
 let currentMarkdownSupport = false;
@@ -74,7 +74,7 @@ export async function getAccessToken(appId: string, clientSecret: string): Promi
  * 实际执行 Token 获取的内部函数
  */
 async function doFetchToken(appId: string, clientSecret: string): Promise<string> {
-  const requestBody = { appId, clientSecret };
+  const requestBody = { app_id: appId, app_secret: clientSecret };
   const requestHeaders = { "Content-Type": "application/json" };
   
   // 打印请求信息（隐藏敏感信息）
@@ -106,7 +106,7 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
     // 隐藏 token 值
     const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"');
     console.log(`[umibot-api:${appId}] <<< Body:`, logBody);
-    data = JSON.parse(rawBody) as { access_token?: string; expires_in?: number };
+    data = JSON.parse(rawBody)?.data as { access_token?: string; expires_in?: number };
   } catch (err) {
     console.error(`[umibot-api:${appId}] <<< Parse error:`, err);
     throw new Error(`Failed to parse access_token response: ${err instanceof Error ? err.message : String(err)}`);
@@ -183,7 +183,7 @@ export async function apiRequest<T = unknown>(
 ): Promise<T> {
   const url = `${API_BASE}${path}`;
   const headers: Record<string, string> = {
-    Authorization: `QQBot ${accessToken}`,
+    Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
   };
   
@@ -237,16 +237,21 @@ export async function apiRequest<T = unknown>(
 
   let data: T;
   let rawBody: string;
+  console.log(`[umibot-api] <<< Body: ${JSON.stringify(res)}`);
   try {
     rawBody = await res.text();
+    console.log(`[umibot-api] <<< Body: ${rawBody}`);
     data = JSON.parse(rawBody) as T;
+    console.log(`[umibot-api] <<< Data: ${JSON.stringify(data)}`);
   } catch (err) {
     throw new Error(`Failed to parse response[${path}]: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   if (!res.ok) {
-    const error = data as { message?: string; code?: number };
-    throw new Error(`API Error [${path}]: ${error.message ?? JSON.stringify(data)}`);
+    const error = data as { message?: string | unknown; code?: number };
+    const msg = error.message;
+    const msgStr = msg == null ? JSON.stringify(data) : (typeof msg === "string" ? msg : JSON.stringify(msg));
+    throw new Error(`API Error [${path}]: ${msgStr}`);
   }
 
   return data;
@@ -291,9 +296,16 @@ async function apiRequestWithRetry<T = unknown>(
   throw lastError!;
 }
 
-export async function getGatewayUrl(accessToken: string): Promise<string> {
-  const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway");
-  return data.url;
+/**
+ * 使用自定义 WSS 时，openclaw 能否收到消息取决于该 WSS 后端是否按协议推送事件。
+ * 后端必须对「别人发给机器人的消息」下发 op=0 + t=C2C_MESSAGE_CREATE（等）且 d 结构符合 types.ts。
+ * 详见 docs/gateway-ws-backend.md。
+ */
+export async function getGatewayUrl(appId: string, appSecret: string): Promise<string> {
+  // const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway");
+  // console.log(`[umibot-api] getGatewayUrl: got url=${data?.url ?? "(empty)"}`);
+  return `wss://testaest-v1.umi6.com/ws/lobster?app_id=${appId}&app_secret=${appSecret}&source=claw`;
+  // return data.url;
 }
 
 // ============ 消息发送接口 ============
@@ -304,20 +316,29 @@ export interface MessageResponse {
 }
 
 function buildMessageBody(
+  accessToken: string,
   content: string,
   msgId: string | undefined,
-  msgSeq: number
+  msgSeq: number,
+  openid?: string,
+  room_id?: string
 ): Record<string, unknown> {
   const body: Record<string, unknown> = currentMarkdownSupport
     ? {
+        access_token: accessToken,
         markdown: { content },
         msg_type: 2,
         msg_seq: msgSeq,
+        uuid: openid,
+        room_id
       }
     : {
+        access_token: accessToken,
         content,
         msg_type: 0,
         msg_seq: msgSeq,
+        uuid: openid,
+        room_id
       };
 
   if (msgId) {
@@ -330,11 +351,14 @@ export async function sendC2CMessage(
   accessToken: string,
   openid: string,
   content: string,
-  msgId?: string
+  msgId?: string,
+  room_id?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq);
-  return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
+  const body = buildMessageBody(accessToken, content, msgId, msgSeq, openid, room_id);
+
+  console.log(`[umibot-api] sendC2CMessage: ${JSON.stringify(body)}`);
+  return apiRequest(accessToken, "POST", `/sn_vlrykm_soojj97v_dpjxey/api/lobster.Content/create`, body);
 }
 
 export async function sendC2CInputNotify(
@@ -375,7 +399,7 @@ export async function sendGroupMessage(
   msgId?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(content, msgId, msgSeq);
+  const body = buildMessageBody(accessToken, content, msgId, msgSeq);
   return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
 }
 

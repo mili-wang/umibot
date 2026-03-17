@@ -141,6 +141,7 @@ function makeUserKey(user: Partial<KnownUser>): string {
  */
 export function recordKnownUser(user: {
   openid: string;
+  room_id?: string;
   type: "c2c" | "group";
   nickname?: string;
   groupOpenid?: string;

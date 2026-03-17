@@ -76,7 +76,7 @@ export function resolveQQBotAccount(
       allowFrom: umibot?.allowFrom,
       systemPrompt: umibot?.systemPrompt,
       imageServerBaseUrl: umibot?.imageServerBaseUrl,
-      markdownSupport: umibot?.markdownSupport ?? true,
+      markdownSupport: umibot?.markdownSupport ?? false,
     };
     appId = umibot?.appId ?? "";
   } else {
