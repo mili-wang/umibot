@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-/** QQ Bot API 最大上传文件大小：20MB */
+/** UMI Bot API 最大上传文件大小：20MB */
 export const MAX_UPLOAD_SIZE = 20 * 1024 * 1024;
 
 /** 大文件阈值（超过此值发送进度提示）：5MB */
@@ -34,7 +34,7 @@ export function checkFileSize(filePath: string, maxSize = MAX_UPLOAD_SIZE): File
       return {
         ok: false,
         size: stat.size,
-        error: `文件过大 (${sizeMB}MB)，QQ Bot API 上传限制为 ${limitMB}MB`,
+        error: `文件过大 (${sizeMB}MB)，UMI Bot API 上传限制为 ${limitMB}MB`,
       };
     }
     return { ok: true, size: stat.size };

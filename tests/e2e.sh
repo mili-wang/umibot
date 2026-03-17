@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# QQBot Plugin — E2E Test Suite
+# UMIBot Plugin — E2E Test Suite
 #
 # 环境变量（必填，详见 .env.example）:
-#   BOT1_APPID / BOT1_SECRET   — 第一个 QQ Bot
-#   BOT2_APPID / BOT2_SECRET   — 第二个 QQ Bot
+#   BOT1_APPID / BOT1_SECRET   — 第一个 UMI Bot
+#   BOT2_APPID / BOT2_SECRET   — 第二个 UMI Bot
 #   BOT1_TEST_OPENID           — Bot1 的测试用户 OpenID（C2C）
 #   BOT2_TEST_OPENID           — Bot2 的测试用户 OpenID（C2C）
 #
@@ -216,7 +216,7 @@ assert_http_ok "message.bot2_text_c2c_http" "$MSG_OUT2" || true
 
 # 3.3 文件消息测试
 TEST_FILE="/tmp/e2e-test.txt"
-echo "[E2E Test] QQBot file message test @ $(date '+%Y-%m-%d %H:%M:%S')" > "$TEST_FILE"
+echo "[E2E Test] UMIBot file message test @ $(date '+%Y-%m-%d %H:%M:%S')" > "$TEST_FILE"
 log "生成测试文件 / Generated test file: $TEST_FILE"
 
 if [ -f "$TEST_FILE" ]; then
@@ -269,7 +269,7 @@ jq -n \
 
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
-echo -e "${BOLD}║           QQBot E2E Test Report                  ║${RESET}"
+echo -e "${BOLD}║           UMIBot E2E Test Report                  ║${RESET}"
 echo -e "${BOLD}╠══════════════════════════════════════════════════╣${RESET}"
 echo -e "║ OpenClaw Version : ${OC_VERSION}"
 echo -e "║ Node             : $(node -v)"

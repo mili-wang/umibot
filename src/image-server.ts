@@ -156,7 +156,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   const url = new URL(req.url || "/", `http://localhost:${currentConfig.port}`);
   const pathname = url.pathname;
 
-  // 设置 CORS 头（允许 QQ 服务器访问）
+  // 设置 CORS 头（允许 UMI 服务器访问）
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 
@@ -443,9 +443,12 @@ export async function downloadFile(
     // 确定文件名
     let finalFilename: string;
     if (originalFilename) {
+      // UMI 平台返回的 filename 可能是 URL 编码的（如 %E7%AC%94%E5%A2%A8...），先解码
+      let decodedFilename = originalFilename;
+      try { decodedFilename = decodeURIComponent(originalFilename); } catch { /* keep original */ }
       // 使用原始文件名，但添加时间戳避免冲突
-      const ext = path.extname(originalFilename);
-      const baseName = path.basename(originalFilename, ext);
+      const ext = path.extname(decodedFilename);
+      const baseName = path.basename(decodedFilename, ext);
       const timestamp = Date.now();
       finalFilename = `${baseName}_${timestamp}${ext}`;
     } else {

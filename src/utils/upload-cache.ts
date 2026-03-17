@@ -1,7 +1,7 @@
 /**
  * file_info 缓存 — 借鉴 Telegram file_id 机制
  * 
- * QQ Bot API 上传文件后返回 file_info + ttl，在 TTL 内相同文件可直接复用 file_info
+ * UMI Bot API 上传文件后返回 file_info + ttl，在 TTL 内相同文件可直接复用 file_info
  * 避免重复上传同一文件，节省带宽和时间。
  * 
  * 缓存 key = md5(fileContent) + targetType(c2c/group) + targetId + fileType

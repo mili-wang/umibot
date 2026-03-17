@@ -8,7 +8,7 @@ export function setQQBotRuntime(next: PluginRuntime) {
 
 export function getQQBotRuntime(): PluginRuntime {
   if (!runtime) {
-    throw new Error("QQBot runtime not initialized");
+    throw new Error("UMIBot runtime not initialized");
   }
   return runtime;
 }

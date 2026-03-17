@@ -5,8 +5,8 @@ import { decode, encode, isSilk } from "silk-wasm";
 import { detectFfmpeg, isWindows } from "./platform.js";
 
 /**
- * 检查文件是否为 SILK 格式（QQ/微信语音常用格式）
- * QQ 语音文件通常以 .amr 扩展名保存，但实际编码可能是 SILK v3
+ * 检查文件是否为 SILK 格式（UMI/微信语音常用格式）
+ * UMI 语音文件通常以 .amr 扩展名保存，但实际编码可能是 SILK v3
  * SILK 文件头部标识: 0x02 "#!SILK_V3"
  */
 function isSilkFile(filePath: string): boolean {
@@ -55,8 +55,8 @@ function pcmToWav(pcmData: Uint8Array, sampleRate: number, channels: number = 1,
 }
 
 /**
- * 去除 QQ 语音文件的 AMR 头（如果存在）
- * QQ 的 .amr 文件可能在 SILK 数据前有 "#!AMR\n" 头（6 字节）
+ * 去除 UMI 语音文件的 AMR 头（如果存在）
+ * UMI 的 .amr 文件可能在 SILK 数据前有 "#!AMR\n" 头（6 字节）
  * 需要去除后才能被 silk-wasm 正确解码
  */
 function stripAmrHeader(buf: Buffer): Buffer {
@@ -96,7 +96,7 @@ export async function convertSilkToWav(
   }
 
   // SILK 解码为 PCM (s16le)
-  // QQ 语音通常采样率为 24000Hz
+  // UMI 语音通常采样率为 24000Hz
   const sampleRate = 24000;
   const result = await decode(rawData, sampleRate);
 
@@ -366,13 +366,13 @@ export async function textToSilk(
 
 // ============ 核心：任意音频 → SILK Base64 ============
 
-/** QQ Bot API 原生支持上传的音频格式（无需转换为 SILK） */
+/** UMI Bot API 原生支持上传的音频格式（无需转换为 SILK） */
 const QQ_NATIVE_UPLOAD_FORMATS = [".wav", ".mp3", ".silk"];
 
 /**
- * 将本地音频文件转换为 QQ Bot 可上传的 Base64
+ * 将本地音频文件转换为 UMI Bot 可上传的 Base64
  *
- * QQ Bot API 支持直传 WAV、MP3、SILK 三种格式，其他格式仍需转换。
+ * UMI Bot API 支持直传 WAV、MP3、SILK 三种格式，其他格式仍需转换。
  * 转换策略（参考 NapCat/go-cqhttp/Discord/Telegram 的做法）：
  *
  * 1. WAV / MP3 / SILK → 直传（跳过转换）
@@ -393,10 +393,10 @@ export async function audioFileToSilkBase64(filePath: string, directUploadFormat
 
   const ext = path.extname(filePath).toLowerCase();
 
-  // 0. 直传判断：QQ Bot API 原生支持 WAV/MP3/SILK，可通过配置覆盖
+  // 0. 直传判断：UMI Bot API 原生支持 WAV/MP3/SILK，可通过配置覆盖
   const uploadFormats = directUploadFormats ? normalizeFormats(directUploadFormats) : QQ_NATIVE_UPLOAD_FORMATS;
   if (uploadFormats.includes(ext)) {
-    console.log(`[audio-convert] direct upload (QQ native format): ${ext} (${buf.length} bytes)`);
+    console.log(`[audio-convert] direct upload (UMI native format): ${ext} (${buf.length} bytes)`);
     return buf.toString("base64");
   }
 

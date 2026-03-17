@@ -10,7 +10,7 @@ import type { ResolvedQQBotAccount } from "./types.js";
 import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, applyQQBotAccountConfig, resolveDefaultQQBotAccountId } from "./config.js";
 import { sendText, sendMedia } from "./outbound.js";
 import { startGateway } from "./gateway.js";
-import { qqbotOnboardingAdapter } from "./onboarding.js";
+import { umibotOnboardingAdapter } from "./onboarding.js";
 import { getQQBotRuntime } from "./runtime.js";
 
 /**
@@ -47,14 +47,14 @@ function chunkText(text: string, limit: number): string[] {
   return chunks;
 }
 
-export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
+export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   id: "umibot",
   meta: {
     id: "umibot",
-    label: "QQ Bot",
-    selectionLabel: "QQ Bot",
+    label: "UMI Bot",
+    selectionLabel: "UMI Bot",
     docsPath: "/docs/channels/umibot",
-    blurb: "Connect to QQ via official QQ Bot API",
+    blurb: "Connect to UMI via official UMI Bot API",
     order: 50,
   },
   capabilities: {
@@ -70,24 +70,12 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   },
   reload: { configPrefixes: ["channels.umibot"] },
   // CLI onboarding wizard
-  onboarding: qqbotOnboardingAdapter,
+  onboarding: umibotOnboardingAdapter,
 
   config: {
-    listAccountIds: (cfg) => {
-      const ids = listQQBotAccountIds(cfg);
-      console.log(`[umibot:channel] listAccountIds: ${JSON.stringify(ids)}`);
-      return ids;
-    },
-    resolveAccount: (cfg, accountId) => {
-      const account = resolveQQBotAccount(cfg, accountId);
-      console.log(`[umibot:channel] resolveAccount: input=${accountId} → resolved=${account.accountId}, appId=${account.appId}, enabled=${account.enabled}`);
-      return account;
-    },
-    defaultAccountId: (cfg) => {
-      const id = resolveDefaultQQBotAccountId(cfg);
-      console.log(`[umibot:channel] defaultAccountId: ${id}`);
-      return id;
-    },
+    listAccountIds: (cfg) => listQQBotAccountIds(cfg),
+    resolveAccount: (cfg, accountId) => resolveQQBotAccount(cfg, accountId),
+    defaultAccountId: (cfg) => resolveDefaultQQBotAccountId(cfg),
     // 新增：设置账户启用状态
     setAccountEnabled: ({ cfg, accountId, enabled }) =>
       setAccountEnabledInConfigSection({
@@ -126,7 +114,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         .map((entry: string | number) => String(entry).trim())
         .filter(Boolean)
         .map((entry: string) => entry.replace(/^umibot:/i, ""))
-        .map((entry: string) => entry.toUpperCase()), // QQ openid 是大写的
+        .map((entry: string) => entry.toUpperCase()), // UMI openid 是大写的
   },
   setup: {
     // 新增：规范化账户 ID
@@ -141,7 +129,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       }),
     validateInput: ({ input }) => {
       if (!input.token && !input.tokenFile && !input.useEnv) {
-        return "QQBot requires --token (format: appId:clientSecret) or --use-env";
+        return "UMIBot requires --token (format: appId:clientSecret) or --use-env";
       }
       return null;
     },
@@ -179,38 +167,38 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
      * - channel:channelid -> 频道
      * - 纯 openid（32位十六进制）-> 私聊
      */
-    normalizeTarget: (target: string) => {
+    normalizeTarget: (target: string): string | undefined => {
       // 去掉 umibot: 前缀（如果有）
       const id = target.replace(/^umibot:/i, "");
 
       // 检查是否是已知格式
       if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
-        return { ok: true, to: `umibot:${id}` };
+        return `umibot:${id}`;
       }
 
       // 检查是否是纯 openid（32位十六进制，不带连字符）
-      // QQ Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
+      // UMI Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
       const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
       if (openIdHexPattern.test(id)) {
-        return { ok: true, to: `umibot:c2c:${id}` };
+        return `umibot:c2c:${id}`;
       }
 
       // 检查是否是 UUID 格式的 openid（带连字符）
       const openIdUuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
       if (openIdUuidPattern.test(id)) {
-        return { ok: true, to: `umibot:c2c:${id}` };
+        return `umibot:c2c:${id}`;
       }
 
       // 不认识的格式
-      return { ok: false, error: "Unrecognized target format" };
+      return undefined;
     },
     /**
      * 目标解析器配置
-     * 用于判断一个目标 ID 是否看起来像 QQ Bot 的格式
+     * 用于判断一个目标 ID 是否看起来像 UMI Bot 的格式
      */
     targetResolver: {
       /**
-       * 判断目标 ID 是否可能是 QQ Bot 格式
+       * 判断目标 ID 是否可能是 UMI Bot 格式
        * 支持以下格式：
        * - umibot:c2c:xxx
        * - umibot:group:xxx  
@@ -237,7 +225,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         const openIdPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
         return openIdPattern.test(id);
       },
-      hint: "QQ Bot 目标格式: umibot:c2c:openid (私聊) 或 umibot:group:groupid (群聊)",
+      hint: "UMI Bot 目标格式: umibot:c2c:openid (私聊) 或 umibot:group:groupid (群聊)",
     },
   },
   outbound: {

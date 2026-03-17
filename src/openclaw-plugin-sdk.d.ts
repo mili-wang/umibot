@@ -171,7 +171,7 @@ declare module "openclaw/plugin-sdk" {
   }
 
   /**
-   * Setup 输入参数（扩展类型以支持 QQBot 特定字段）
+   * Setup 输入参数（扩展类型以支持 UMIBot 特定字段）
    */
   export interface SetupInput {
     token?: string;
@@ -215,7 +215,7 @@ declare module "openclaw/plugin-sdk" {
    * 频道插件 Messaging 接口
    */
   export interface ChannelPluginMessaging {
-    normalizeTarget?: (target: string) => NormalizeTargetResult;
+    normalizeTarget?: (target: string) => string | undefined;
     targetResolver?: TargetResolver;
     [key: string]: unknown;
   }

@@ -1,5 +1,5 @@
 /**
- * QQ Bot API 鉴权和请求封装
+ * UMI Bot API 鉴权和请求封装
  * [修复版] 已重构为支持多实例并发，消除全局变量冲突
  */
 
@@ -11,6 +11,35 @@ const TOKEN_URL = "https://testaest-v1.umi6.com/sn_vlrykm_soojj97v_dpjxey/api/lo
 
 // 运行时配置
 let currentMarkdownSupport = false;
+
+// 出站消息回调钩子：消息发送成功且回包含 ext_info.ref_idx 时触发
+// 由外层（gateway/outbound）注册，用于统一缓存 bot 出站消息的 refIdx
+
+/** 出站消息元信息（结构化存储，不做预格式化） */
+export interface OutboundMeta {
+  /** 消息文本内容 */
+  text?: string;
+  /** 媒体类型 */
+  mediaType?: "image" | "voice" | "video" | "file";
+  /** 媒体来源：在线 URL */
+  mediaUrl?: string;
+  /** 媒体来源：本地文件路径或文件名 */
+  mediaLocalPath?: string;
+  /** TTS 原文本（仅 voice 类型有效，用于保存 TTS 前的文本内容） */
+  ttsText?: string;
+}
+
+type OnMessageSentCallback = (refIdx: string, meta: OutboundMeta) => void;
+let onMessageSentHook: OnMessageSentCallback | null = null;
+
+/**
+ * 注册出站消息回调
+ * 当消息发送成功且 UMI 返回 ref_idx 时，自动回调此函数
+ * 用于在最底层统一缓存 bot 出站消息的 refIdx
+ */
+export function onMessageSent(callback: OnMessageSentCallback): void {
+  onMessageSentHook = callback;
+}
 
 /**
  * 初始化 API 配置
@@ -42,7 +71,8 @@ const tokenFetchPromises = new Map<string, Promise<string>>();
  * 按 appId 隔离，支持多机器人并发请求。
  */
 export async function getAccessToken(appId: string, clientSecret: string): Promise<string> {
-  const cachedToken = tokenCacheMap.get(appId);
+  const normalizedAppId = String(appId).trim();
+  const cachedToken = tokenCacheMap.get(normalizedAppId);
 
   // 检查缓存：未过期 且 appId 未变化 时复用
   if (cachedToken && Date.now() < cachedToken.expiresAt - 5 * 60 * 1000) {
@@ -50,23 +80,23 @@ export async function getAccessToken(appId: string, clientSecret: string): Promi
   }
 
   // Singleflight: 如果当前 appId 已有进行中的 Token 获取请求，复用它
-  let fetchPromise = tokenFetchPromises.get(appId);
+  let fetchPromise = tokenFetchPromises.get(normalizedAppId);
   if (fetchPromise) {
-    console.log(`[umibot-api:${appId}] Token fetch in progress, waiting for existing request...`);
+    console.log(`[umibot-api:${normalizedAppId}] Token fetch in progress, waiting for existing request...`);
     return fetchPromise;
   }
 
   // 创建新的 Token 获取 Promise（singleflight 入口）
   fetchPromise = (async () => {
     try {
-      return await doFetchToken(appId, clientSecret);
+      return await doFetchToken(normalizedAppId, clientSecret);
     } finally {
       // 无论成功失败，都清除 Promise 缓存
-      tokenFetchPromises.delete(appId);
+      tokenFetchPromises.delete(normalizedAppId);
     }
   })();
 
-  tokenFetchPromises.set(appId, fetchPromise);
+  tokenFetchPromises.set(normalizedAppId, fetchPromise);
   return fetchPromise;
 }
 
@@ -97,7 +127,8 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
   response.headers.forEach((value, key) => {
     responseHeaders[key] = value;
   });
-  console.log(`[umibot-api:${appId}] <<< Status: ${response.status} ${response.statusText}`);
+  const tokenTraceId = response.headers.get("x-tps-trace-id") ?? "";
+  console.log(`[umibot-api:${appId}] <<< Status: ${response.status} ${response.statusText}${tokenTraceId ? ` | TraceId: ${tokenTraceId}` : ""}`);
 
   let data: { access_token?: string; expires_in?: number };
   let rawBody: string;
@@ -134,8 +165,9 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
  */
 export function clearTokenCache(appId?: string): void {
   if (appId) {
-    tokenCacheMap.delete(appId);
-    console.log(`[umibot-api:${appId}] Token cache cleared manually.`);
+    const normalizedAppId = String(appId).trim();
+    tokenCacheMap.delete(normalizedAppId);
+    console.log(`[umibot-api:${normalizedAppId}] Token cache cleared manually.`);
   } else {
     tokenCacheMap.clear();
     console.log(`[umibot-api] All token caches cleared.`);
@@ -212,6 +244,7 @@ export async function apiRequest<T = unknown>(
     if (typeof logBody.file_data === "string") {
       logBody.file_data = `<base64 ${(logBody.file_data as string).length} chars>`;
     }
+    console.log(`[umibot-api] >>> Body:`, JSON.stringify(logBody));
   }
 
   let res: Response;
@@ -233,14 +266,15 @@ export async function apiRequest<T = unknown>(
   res.headers.forEach((value, key) => {
     responseHeaders[key] = value;
   });
-  console.log(`[umibot-api] <<< Status: ${res.status} ${res.statusText}`);
+  const traceId = res.headers.get("x-tps-trace-id") ?? "";
+  console.log(`[umibot-api] <<< Status: ${res.status} ${res.statusText}${traceId ? ` | TraceId: ${traceId}` : ""}`);
 
   let data: T;
   let rawBody: string;
   console.log(`[umibot-api] <<< Body: ${JSON.stringify(res)}`);
   try {
     rawBody = await res.text();
-    console.log(`[umibot-api] <<< Body: ${rawBody}`);
+    console.log(`[umibot-api] <<< Body:`, rawBody);
     data = JSON.parse(rawBody) as T;
     console.log(`[umibot-api] <<< Data: ${JSON.stringify(data)}`);
   } catch (err) {
@@ -313,6 +347,32 @@ export async function getGatewayUrl(appId: string, appSecret: string): Promise<s
 export interface MessageResponse {
   id: string;
   timestamp: number | string;
+  /** 消息的引用索引信息（出站时由 UMI 服务端返回） */
+  ext_info?: {
+    ref_idx?: string;
+  };
+}
+
+/**
+ * 发送消息并自动触发 refIdx 回调
+ * 所有消息发送函数统一经过此处，确保每条出站消息的 refIdx 都被捕获
+ */
+async function sendAndNotify(
+  accessToken: string,
+  method: string,
+  path: string,
+  body: unknown,
+  meta: OutboundMeta,
+): Promise<MessageResponse> {
+  const result = await apiRequest<MessageResponse>(accessToken, method, path, body);
+  if (result.ext_info?.ref_idx && onMessageSentHook) {
+    try {
+      onMessageSentHook(result.ext_info.ref_idx, meta);
+    } catch (err) {
+      console.error(`[umibot-api] onMessageSent hook error: ${err}`);
+    }
+  }
+  return result;
 }
 
 function buildMessageBody(
@@ -321,7 +381,8 @@ function buildMessageBody(
   msgId: string | undefined,
   msgSeq: number,
   openid?: string,
-  room_id?: string
+  room_id?: string,
+  messageReference?: string
 ): Record<string, unknown> {
   const body: Record<string, unknown> = currentMarkdownSupport
     ? {
@@ -344,6 +405,9 @@ function buildMessageBody(
   if (msgId) {
     body.msg_id = msgId;
   }
+  if (messageReference && !currentMarkdownSupport) {
+    body.message_reference = { message_id: messageReference };
+  }
   return body;
 }
 
@@ -352,13 +416,12 @@ export async function sendC2CMessage(
   openid: string,
   content: string,
   msgId?: string,
-  room_id?: string
+  room_id?: string,
+  messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(accessToken, content, msgId, msgSeq, openid, room_id);
-
-  console.log(`[umibot-api] sendC2CMessage: ${JSON.stringify(body)}`);
-  return apiRequest(accessToken, "POST", `/sn_vlrykm_soojj97v_dpjxey/api/lobster.Content/create`, body);
+  const body = buildMessageBody(accessToken, content, msgId, msgSeq, openid, room_id, messageReference);
+  return sendAndNotify(accessToken, "POST", `/sn_vlrykm_soojj97v_dpjxey/api/lobster.Content/create`, body, { text: content });
 }
 
 export async function sendC2CInputNotify(
@@ -366,7 +429,7 @@ export async function sendC2CInputNotify(
   openid: string,
   msgId?: string,
   inputSecond: number = 60
-): Promise<void> {
+): Promise<{ refIdx?: string }> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   const body = {
     msg_type: 6,
@@ -377,30 +440,37 @@ export async function sendC2CInputNotify(
     msg_seq: msgSeq,
     ...(msgId ? { msg_id: msgId } : {}),
   };
-  await apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
+  const response = await apiRequest<{ ext_info?: { ref_idx?: string } }>(accessToken, "POST", `/v2/users/${openid}/messages`, body);
+  return { refIdx: response.ext_info?.ref_idx };
 }
 
 export async function sendChannelMessage(
   accessToken: string,
   channelId: string,
   content: string,
-  msgId?: string
+  msgId?: string,
+  messageReference?: string
 ): Promise<{ id: string; timestamp: string }> {
-  return apiRequest(accessToken, "POST", `/channels/${channelId}/messages`, {
+  const body: Record<string, unknown> = {
     content,
     ...(msgId ? { msg_id: msgId } : {}),
-  });
+  };
+  if (messageReference) {
+    body.message_reference = { message_id: messageReference };
+  }
+  return apiRequest(accessToken, "POST", `/channels/${channelId}/messages`, body);
 }
 
 export async function sendGroupMessage(
   accessToken: string,
   groupOpenid: string,
   content: string,
-  msgId?: string
+  msgId?: string,
+  messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  const body = buildMessageBody(accessToken, content, msgId, msgSeq);
-  return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body);
+  const body = buildMessageBody(accessToken, content, msgId, msgSeq, groupOpenid, undefined, messageReference);
+  return sendAndNotify(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body, { text: content });
 }
 
 function buildProactiveMessageBody(content: string): Record<string, unknown> {
@@ -418,9 +488,9 @@ export async function sendProactiveC2CMessage(
   accessToken: string,
   openid: string,
   content: string
-): Promise<{ id: string; timestamp: number }> {
+): Promise<MessageResponse> {
   const body = buildProactiveMessageBody(content);
-  return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body);
+  return sendAndNotify(accessToken, "POST", `/v2/users/${openid}/messages`, body, { text: content });
 }
 
 export async function sendProactiveGroupMessage(
@@ -523,16 +593,17 @@ export async function sendC2CMediaMessage(
   openid: string,
   fileInfo: string,
   msgId?: string,
-  content?: string
-): Promise<{ id: string; timestamp: number }> {
+  content?: string,
+  meta?: OutboundMeta,
+): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
-  return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, {
+  return sendAndNotify(accessToken, "POST", `/v2/users/${openid}/messages`, {
     msg_type: 7,
     media: { file_info: fileInfo },
     msg_seq: msgSeq,
     ...(content ? { content } : {}),
     ...(msgId ? { msg_id: msgId } : {}),
-  });
+  }, meta ?? { text: content });
 }
 
 export async function sendGroupMediaMessage(
@@ -552,21 +623,29 @@ export async function sendGroupMediaMessage(
   });
 }
 
-export async function sendC2CImageMessage(accessToken: string, openid: string, imageUrl: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: number }> {
+export async function sendC2CImageMessage(accessToken: string, openid: string, imageUrl: string, msgId?: string, content?: string, localPath?: string): Promise<MessageResponse> {
   let uploadResult: UploadMediaResponse;
-  if (imageUrl.startsWith("data:")) {
+  const isBase64 = imageUrl.startsWith("data:");
+  if (isBase64) {
     const matches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
     if (!matches) throw new Error("Invalid Base64 Data URL format");
     uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.IMAGE, undefined, matches[2], false);
   } else {
     uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.IMAGE, imageUrl, undefined, false);
   }
-  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
+  const meta: OutboundMeta = {
+    text: content,
+    mediaType: "image",
+    ...(!isBase64 ? { mediaUrl: imageUrl } : {}),
+    ...(localPath ? { mediaLocalPath: localPath } : {}),
+  };
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content, meta);
 }
 
 export async function sendGroupImageMessage(accessToken: string, groupOpenid: string, imageUrl: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: string }> {
   let uploadResult: UploadMediaResponse;
-  if (imageUrl.startsWith("data:")) {
+  const isBase64 = imageUrl.startsWith("data:");
+  if (isBase64) {
     const matches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
     if (!matches) throw new Error("Invalid Base64 Data URL format");
     uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.IMAGE, undefined, matches[2], false);
@@ -576,9 +655,13 @@ export async function sendGroupImageMessage(accessToken: string, groupOpenid: st
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
 }
 
-export async function sendC2CVoiceMessage(accessToken: string, openid: string, voiceBase64: string, msgId?: string): Promise<{ id: string; timestamp: number }> {
+export async function sendC2CVoiceMessage(accessToken: string, openid: string, voiceBase64: string, msgId?: string, ttsText?: string, filePath?: string): Promise<MessageResponse> {
   const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VOICE, undefined, voiceBase64, false);
-  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId);
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, undefined, { 
+    mediaType: "voice", 
+    ...(ttsText ? { ttsText } : {}),
+    ...(filePath ? { mediaLocalPath: filePath } : {})
+  });
 }
 
 export async function sendGroupVoiceMessage(accessToken: string, groupOpenid: string, voiceBase64: string, msgId?: string): Promise<{ id: string; timestamp: string }> {
@@ -586,9 +669,10 @@ export async function sendGroupVoiceMessage(accessToken: string, groupOpenid: st
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId);
 }
 
-export async function sendC2CFileMessage(accessToken: string, openid: string, fileBase64?: string, fileUrl?: string, msgId?: string, fileName?: string): Promise<{ id: string; timestamp: number }> {
+export async function sendC2CFileMessage(accessToken: string, openid: string, fileBase64?: string, fileUrl?: string, msgId?: string, fileName?: string, localFilePath?: string): Promise<MessageResponse> {
   const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.FILE, fileUrl, fileBase64, false, fileName);
-  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId);
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, undefined,
+    { mediaType: "file", mediaUrl: fileUrl, mediaLocalPath: localFilePath ?? fileName });
 }
 
 export async function sendGroupFileMessage(accessToken: string, groupOpenid: string, fileBase64?: string, fileUrl?: string, msgId?: string, fileName?: string): Promise<{ id: string; timestamp: string }> {
@@ -596,9 +680,10 @@ export async function sendGroupFileMessage(accessToken: string, groupOpenid: str
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId);
 }
 
-export async function sendC2CVideoMessage(accessToken: string, openid: string, videoUrl?: string, videoBase64?: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: number }> {
+export async function sendC2CVideoMessage(accessToken: string, openid: string, videoUrl?: string, videoBase64?: string, msgId?: string, content?: string, localPath?: string): Promise<MessageResponse> {
   const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VIDEO, videoUrl, videoBase64, false);
-  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content);
+  return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, content,
+    { text: content, mediaType: "video", ...(videoUrl ? { mediaUrl: videoUrl } : {}), ...(localPath ? { mediaLocalPath: localPath } : {}) });
 }
 
 export async function sendGroupVideoMessage(accessToken: string, groupOpenid: string, videoUrl?: string, videoBase64?: string, msgId?: string, content?: string): Promise<{ id: string; timestamp: string }> {

@@ -105,21 +105,32 @@ export function expandTilde(p: string): string {
 }
 
 /**
- * 对路径进行完整的规范化处理：展开波浪线 + 去除首尾空白
+ * 对路径进行完整的规范化处理：剥离 file:// 前缀 + 展开波浪线 + 去除首尾空白
  * 所有文件操作前应通过此函数处理用户输入的路径
  */
 export function normalizePath(p: string): string {
-  return expandTilde(p.trim());
+  let result = p.trim();
+  // 剥离 file:// 协议前缀: file:///Users/... → /Users/...
+  if (result.startsWith("file://")) {
+    result = result.slice("file://".length);
+    // 处理 URL 编码（file:// 路径中空格等字符可能被编码）
+    try {
+      result = decodeURIComponent(result);
+    } catch {
+      // decodeURIComponent 失败时保留原样
+    }
+  }
+  return expandTilde(result);
 }
 
 // ============ 文件名 UTF-8 规范化 ============
 
 /**
- * 规范化文件名为 QQ Bot API 要求的 UTF-8 编码格式
+ * 规范化文件名为 UMI Bot API 要求的 UTF-8 编码格式
  *
  * 问题场景:
  * - macOS HFS+/APFS 文件系统使用 NFD（Unicode 分解形式）存储文件名，
- *   例如「中文.txt」被分解为多个码点，QQ Bot API 可能拒绝
+ *   例如「中文.txt」被分解为多个码点，UMI Bot API 可能拒绝
  * - 文件名可能包含 API 不接受的特殊控制字符
  * - URL 路径中可能包含 percent-encoded 的文件名需要解码
  *
@@ -163,6 +174,7 @@ export function sanitizeFileName(name: string): string {
  * - Windows 绝对路径: C:\..., D:/..., \\server\share
  * - 相对路径: ./file, ../file
  * - 波浪线路径: ~/Desktop/file.png
+ * - file:// 协议: file:///Users/..., file:///home/...
  *
  * 不匹配:
  * - http:// / https:// URL
@@ -170,6 +182,8 @@ export function sanitizeFileName(name: string): string {
  */
 export function isLocalPath(p: string): boolean {
   if (!p) return false;
+  // file:// 协议（本地文件 URI）
+  if (p.startsWith("file://")) return true;
   // 波浪线路径（Mac/Linux 用户常用）
   if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) return true;
   // Unix 绝对路径
@@ -352,7 +366,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   // 检测 silk-wasm
   const silkWasm = await checkSilkWasmAvailable();
   if (!silkWasm) {
-    warnings.push("⚠️ silk-wasm 不可用。QQ 语音消息的收发将无法工作。请确认 Node.js 版本 >= 16 且 WASM 支持正常");
+    warnings.push("⚠️ silk-wasm 不可用。UMI 语音消息的收发将无法工作。请确认 Node.js 版本 >= 16 且 WASM 支持正常");
   }
 
   // 检查数据目录可写性
@@ -385,7 +399,7 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   };
 
   // 打印诊断报告
-  console.log("=== QQBot 环境诊断 ===");
+  console.log("=== UMIBot 环境诊断 ===");
   console.log(`  平台: ${platform} (${arch})`);
   console.log(`  Node: ${nodeVersion}`);
   console.log(`  主目录: ${homeDir}`);

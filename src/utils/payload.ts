@@ -1,5 +1,5 @@
 /**
- * QQBot 结构化消息载荷工具
+ * UMIBot 结构化消息载荷工具
  * 
  * 用于处理 AI 输出的结构化消息载荷，包括：
  * - 定时提醒载荷 (cron_reminder)
@@ -41,7 +41,7 @@ export interface MediaPayload {
 }
 
 /**
- * QQBot 载荷联合类型
+ * UMIBot 载荷联合类型
  */
 export type QQBotPayload = CronReminderPayload | MediaPayload;
 

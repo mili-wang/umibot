@@ -3,7 +3,7 @@ FROM node:22-slim
 ARG OPENCLAW_VERSION=latest
 
 LABEL maintainer="sliverp"
-LABEL description="OpenClaw + QQBot plugin E2E test environment"
+LABEL description="OpenClaw + UMIBot plugin E2E test environment"
 
 # 确保 npm 全局 bin 在 PATH 中
 ENV PATH="/usr/local/lib/node_modules/.bin:${PATH}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# QQBot Plugin — Multi-Version E2E Test Runner
+# UMIBot Plugin — Multi-Version E2E Test Runner
 #
 # 用法 / Usage:
 #   ./tests/run-tests.sh                    # 使用 .env 中的 OPENCLAW_VERSIONS
@@ -48,7 +48,7 @@ else
 fi
 
 echo -e "${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
-echo -e "${BOLD}║     QQBot Multi-Version E2E Test Runner          ║${RESET}"
+echo -e "${BOLD}║     UMIBot Multi-Version E2E Test Runner          ║${RESET}"
 echo -e "${BOLD}╠══════════════════════════════════════════════════╣${RESET}"
 echo -e "║ Versions to test: ${VERSIONS[*]}"
 echo -e "║ Report dir      : ${REPORT_DIR}"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# QQBot 拉取最新 npm 包并更新脚本
+# UMIBot 拉取最新 npm 包并更新脚本
 # 从 npm 下载 @mili-wang/umibot@latest，解压覆盖本地源码，重新安装插件并重启
 # 兼容 clawdbot / openclaw / moltbot，macOS 开箱即用
 #
@@ -55,7 +55,7 @@ check_cmd npm   "npm 通常随 Node.js 一起安装"
 check_cmd tar   "macOS 自带 tar，如果缺失请检查系统完整性"
 
 echo "========================================="
-echo "  QQBot 拉取最新版本并更新"
+echo "  UMIBot 拉取最新版本并更新"
 echo "========================================="
 echo ""
 echo "系统信息:"

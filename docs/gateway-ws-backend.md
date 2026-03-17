@@ -11,8 +11,8 @@
 | 是否要改 | 接口/位置 | 说明 |
 |----------|------------|------|
 | **必须改** | `src/api.ts` 里 **`getGatewayUrl()`** 的返回值 | 让它返回你的 WSS 地址（你已改为自定义 URL）。收消息全靠这条连接，改对即可。 |
-| **不用改** | `getAccessToken()`、`apiRequest()`、`API_BASE`、发消息接口等 | 收消息只走 WS；鉴权/发消息仍用现有逻辑。客户端会用 QQ 的 token 在 Identify 里发给你的 WSS，你后端可校验或忽略。 |
-| **可选** | `getGatewayUrl()` 内部是否请求 QQ `/gateway` | 若已固定用自建 WSS，可不再调 `apiRequest(..., "GET", "/gateway")`，直接 `return 'wss://你的地址';`，避免无意义的官方 API 请求。 |
+| **不用改** | `getAccessToken()`、`apiRequest()`、`API_BASE`、发消息接口等 | 收消息只走 WS；鉴权/发消息仍用现有逻辑。客户端会用 UMI 的 token 在 Identify 里发给你的 WSS，你后端可校验或忽略。 |
+| **可选** | `getGatewayUrl()` 内部是否请求 UMI `/gateway` | 若已固定用自建 WSS，可不再调 `apiRequest(..., "GET", "/gateway")`，直接 `return 'wss://你的地址';`，避免无意义的官方 API 请求。 |
 
 **后端要做的事**：按下面第 1～4 节的协议，对每条「用户发给机器人的消息」向该连接推送一条 **op=0、t=C2C_MESSAGE_CREATE**（或对应事件）、**d** 符合 `src/types.ts`、**s** 递增 的报文。无需在 umibot 里改其它接口。
 
@@ -20,7 +20,7 @@
 
 ## 1. 统一报文格式
 
-每条下行消息建议使用与 QQ 官方一致的负载结构：
+每条下行消息建议使用与 UMI 官方一致的负载结构：
 
 ```ts
 interface WSPayload {
@@ -170,8 +170,8 @@ interface WSPayload {
 
 | op | 含义 | 客户端发送内容 |
 |----|------|----------------|
-| 2 | Identify | `d: { token: "QQBot <accessToken>", intents: number, shard: [0,1] }` |
-| 6 | Resume | `d: { token: "QQBot <accessToken>", session_id: string, seq: number }` |
+| 2 | Identify | `d: { token: "UMIBot <accessToken>", intents: number, shard: [0,1] }` |
+| 6 | Resume | `d: { token: "UMIBot <accessToken>", session_id: string, seq: number }` |
 | 1 | Heartbeat | `d: lastSeq`（上一包收到的 s，若无则为 null） |
 
 ---
@@ -190,13 +190,13 @@ interface WSPayload {
 
 ## 5. 常见问题：改成自定义 WSS 后 openclaw 收不到消息
 
-**原因**：umibot 的**收消息**完全来自当前连接的 WSS。改用自定义地址（如 `wss://xxx.umi6.com/ws/...`）后，客户端不再连 QQ 官方网关，只会收到你的 WSS 后端主动下发的帧。若后端没有把「用户发给机器人的消息」转成并推送 **op=0、t=C2C_MESSAGE_CREATE**（或 AT_MESSAGE_CREATE、GROUP_AT_MESSAGE_CREATE 等）且 **d** 结构符合 `src/types.ts` 的 C2CMessageEvent/GuildMessageEvent/GroupMessageEvent，gateway 就不会往 openclaw 投递，表现为「发消息后 openclaw 接收不到」。
+**原因**：umibot 的**收消息**完全来自当前连接的 WSS。改用自定义地址（如 `wss://xxx.umi6.com/ws/...`）后，客户端不再连 UMI 官方网关，只会收到你的 WSS 后端主动下发的帧。若后端没有把「用户发给机器人的消息」转成并推送 **op=0、t=C2C_MESSAGE_CREATE**（或 AT_MESSAGE_CREATE、GROUP_AT_MESSAGE_CREATE 等）且 **d** 结构符合 `src/types.ts` 的 C2CMessageEvent/GuildMessageEvent/GroupMessageEvent，gateway 就不会往 openclaw 投递，表现为「发消息后 openclaw 接收不到」。
 
 **发送消息**仍走 `api.sgroup.qq.com` 的 HTTP 接口，与 WSS 地址无关，所以机器人主动发出去的消息对方能收到。
 
 **解决思路**：
 
-1. **自建 WSS 作为 QQ 网关代理**：后端连 QQ 官方 gateway，把收到的 QQ 事件原样（或按协议格式）转发给 umibot 客户端；或  
+1. **自建 WSS 作为 UMI 网关代理**：后端连 UMI 官方 gateway，把收到的 UMI 事件原样（或按协议格式）转发给 umibot 客户端；或  
 2. **自建 WSS 自产事件**：后端从其它渠道（如 HTTP 回调、其它 MQ）拿到「用户发给机器人的消息」后，按 `docs/gateway-ws-backend.md` 的格式组包，向该连接下发 `op=0, t=C2C_MESSAGE_CREATE, d={...}, s=递增`。
 
 无论哪种方式，只要在「用户发消息」发生时，对应该连接能收到一条格式正确的 Dispatch（op=0 + 对应 t + 正确 d），openclaw 就能收到并处理。

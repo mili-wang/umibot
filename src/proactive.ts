@@ -1,5 +1,5 @@
 /**
- * QQ Bot 主动发送消息模块
+ * UMI Bot 主动发送消息模块
  * 
  * 该模块提供以下能力：
  * 1. 记录已知用户（曾与机器人交互过的用户）
@@ -309,7 +309,7 @@ export async function sendProactive(
   if (!account.appId || !account.clientSecret) {
     return {
       success: false,
-      error: "QQBot not configured (missing appId or clientSecret)",
+      error: "UMIBot not configured (missing appId or clientSecret)",
     };
   }
   
@@ -482,7 +482,7 @@ export async function sendProactiveMessageDirect(
   if (!account.appId || !account.clientSecret) {
     return {
       success: false,
-      error: "QQBot not configured (missing appId or clientSecret)",
+      error: "UMIBot not configured (missing appId or clientSecret)",
     };
   }
   

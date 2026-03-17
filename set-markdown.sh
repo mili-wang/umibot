@@ -26,7 +26,7 @@ show_help() {
     echo "  $0 status            查看当前状态"
     echo "  $0                   交互式选择"
     echo ""
-    echo "⚠️  注意: 启用 Markdown 需要在 QQ 开放平台申请 Markdown 消息权限"
+    echo "⚠️  注意: 启用 Markdown 需要在 UMI 开放平台申请 Markdown 消息权限"
     echo "         如果没有权限，消息将无法正常发送！"
 }
 
