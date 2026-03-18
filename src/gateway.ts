@@ -495,6 +495,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   let handleMessageFnRef: ((msg: QueuedMessage) => Promise<void>) | null = null;
   let totalEnqueued = 0; // 全局已入队总数（用于溢出保护）
 
+  // messageId 去重：后端重复推送相同 id 会导致频道服务崩溃，同一 id 只处理一次（按容量淘汰，不按时间）
+  const RECENT_MESSAGE_ID_MAX = 50000; // 最多保留 5 万个 id，超出时淘汰最旧的，避免内存无限增长
+  const recentMessageIds = new Map<string, number>(); // messageId -> 首次入队时间（插入顺序即时间序，用于淘汰）
+
   // 获取消息的路由 key（决定并发隔离粒度）
   const getMessagePeerId = (msg: QueuedMessage): string => {
     if (msg.type === "guild") return `guild:${msg.channelId ?? "unknown"}`;
@@ -503,6 +507,19 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   };
 
   const enqueueMessage = (msg: QueuedMessage): void => {
+    const now = Date.now();
+    if (recentMessageIds.has(msg.messageId)) {
+      log?.info?.(`[umibot:${account.accountId}] Dropping duplicate messageId: ${msg.messageId}`);
+      return;
+    }
+    recentMessageIds.set(msg.messageId, now);
+    // 按容量淘汰最旧的条目（Map 按插入顺序迭代，第一个即最旧）
+    while (recentMessageIds.size > RECENT_MESSAGE_ID_MAX) {
+      const oldestKey = recentMessageIds.keys().next().value;
+      if (oldestKey !== undefined) recentMessageIds.delete(oldestKey);
+      else break;
+    }
+
     const peerId = getMessagePeerId(msg);
     const content = (msg.content ?? "").trim().toLowerCase();
     
@@ -1044,8 +1061,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           receivedMediaSection = `\n${mediaSections.join("\n")}`;
         }
 
-        // AI 看到的投递地址必须带完整前缀（umibot:c2c: / umibot:group:）
-        const qualifiedTarget = isGroupChat ? `umibot:group:${event.groupOpenid}` : `umibot:c2c:${event.senderId}`;
+        // AI 看到的投递地址：私聊 umibot:openid，群聊 umibot:group:groupid
+        const qualifiedTarget = isGroupChat ? `umibot:group:${event.groupOpenid}` : `umibot:${event.senderId}`;
 
         // 动态检测 TTS/STT 配置状态
         const hasTTS = !!resolveTTSConfig(cfg as Record<string, unknown>);
@@ -1138,7 +1155,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
 
         const fromAddress = event.type === "guild" ? `umibot:channel:${event.channelId}`
                          : event.type === "group" ? `umibot:group:${event.groupOpenid}`
-                         : `umibot:c2c:${event.senderId}`;
+                         : `umibot:${event.senderId}`;
         const toAddress = fromAddress;
 
         // 计算命令授权状态

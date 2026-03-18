@@ -2,6 +2,8 @@
 
 本文档描述：与 `src/gateway.ts` 连接的 **WebSocket 服务端** 应如何设计返回结果，以便客户端能正确建连、鉴权、收事件与心跳。
 
+**从连接到对话的完整 WS 流程与传参说明**（客户端 + 服务端）见：[ws-connection-and-messages.md](./ws-connection-and-messages.md)。
+
 ---
 
 ## 0. 自建 WSS 后，umibot 侧要改哪些接口才能收到消息
@@ -127,12 +129,20 @@ interface WSPayload {
 
 **C2C_MESSAGE_CREATE 示例**（与 gateway 解析一致）：
 
+- **d 里建议带 `uuid`**（发送者 openid），与 `author.user_openid` 一致即可。若只传 `author` 不传 `uuid`，客户端会退化为用 `author.user_openid` 或 `author.id` 作为发送者。
+- **每条消息的 `s` 必须全局递增**（见下「第二次、第三次…消息」）。
+- **每条消息的 `d.id`（消息 ID）必须唯一**。重复的 messageId 会导致频道服务崩溃。若后端重复推送相同 `id`，客户端会按「最近 5 万个 messageId」做去重：同一 id 只要在缓存内（未因容量淘汰）无论隔多久再次出现都会丢弃，只处理第一次。
+
+第一条示例：
+
 ```json
 {
   "op": 0,
   "s": 2,
   "t": "C2C_MESSAGE_CREATE",
   "d": {
+    "uuid": "用户 openid（与 author.user_openid 一致）",
+    "room_id": "可选",
     "author": {
       "id": "用户ID",
       "union_openid": "",
@@ -146,6 +156,16 @@ interface WSPayload {
   }
 }
 ```
+
+**第二次、第三次…消息怎么发**
+
+- 格式与上面**完全一致**，只改这几项：
+  - **`s`**：必须比上一条大，例如第一条 `s: 2`，第二条 **`s: 3`**，第三条 **`s: 4`**，依次递增。
+  - **`d.id`**：新消息用新的消息 ID（唯一）。
+  - **`d.content`**：新内容。
+  - **`d.timestamp`**：新时间。
+- **`d.uuid` / `d.author`**：同一用户对话可保持不变；换用户则改对应用户信息。
+- 若**第二条收不到**，请检查：1）是否每条都发了**递增的 s**；2）是否在同一连接上连续发两条（不要断连）；3）服务端是否有逻辑漏发第二条 WS 帧。
 
 其他事件（AT_MESSAGE_CREATE、GROUP_AT_MESSAGE_CREATE 等）的 **d** 结构见 `src/types.ts` 中的 `GuildMessageEvent`、`GroupMessageEvent`。
 

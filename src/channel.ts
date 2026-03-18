@@ -159,10 +159,10 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     /**
      * 规范化目标地址
      * 支持以下格式：
-     * - umibot:c2c:openid -> 私聊
+     * - umibot:openid -> 私聊（展示用不含 c2c）
      * - umibot:group:groupid -> 群聊
      * - umibot:channel:channelid -> 频道
-     * - c2c:openid -> 私聊
+     * - c2c:openid -> 私聊，规范化为 umibot:openid
      * - group:groupid -> 群聊
      * - channel:channelid -> 频道
      * - 纯 openid（32位十六进制）-> 私聊
@@ -171,8 +171,11 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       // 去掉 umibot: 前缀（如果有）
       const id = target.replace(/^umibot:/i, "");
 
-      // 检查是否是已知格式
-      if (id.startsWith("c2c:") || id.startsWith("group:") || id.startsWith("channel:")) {
+      // 检查是否是已知格式（私聊规范化为 umibot:openid，不含 c2c）
+      if (id.startsWith("c2c:")) {
+        return `umibot:${id.slice(4)}`;
+      }
+      if (id.startsWith("group:") || id.startsWith("channel:")) {
         return `umibot:${id}`;
       }
 
@@ -180,13 +183,13 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       // UMI Bot OpenID 格式类似: 207A5B8339D01F6582911C014668B77B
       const openIdHexPattern = /^[0-9a-fA-F]{32}$/;
       if (openIdHexPattern.test(id)) {
-        return `umibot:c2c:${id}`;
+        return `umibot:${id}`;
       }
 
       // 检查是否是 UUID 格式的 openid（带连字符）
       const openIdUuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
       if (openIdUuidPattern.test(id)) {
-        return `umibot:c2c:${id}`;
+        return `umibot:${id}`;
       }
 
       // 不认识的格式
@@ -200,32 +203,28 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       /**
        * 判断目标 ID 是否可能是 UMI Bot 格式
        * 支持以下格式：
-       * - umibot:c2c:xxx
-       * - umibot:group:xxx  
+       * - umibot:openid（私聊，展示不含 c2c）
+       * - umibot:group:xxx
        * - umibot:channel:xxx
-       * - c2c:xxx
-       * - group:xxx
-       * - channel:xxx
-       * - UUID 格式的 openid
+       * - c2c:xxx / group:xxx / channel:xxx
+       * - 纯 openid（32 位十六进制或 UUID）
        */
       looksLikeId: (id: string): boolean => {
-        // 带 umibot: 前缀的格式
-        if (/^umibot:(c2c|group|channel):/i.test(id)) {
-          return true;
+        // 带 umibot: 前缀：umibot:openid 或 umibot:group:xxx / umibot:channel:xxx
+        if (/^umibot:/i.test(id)) {
+          const rest = id.replace(/^umibot:/i, "");
+          if (/^(c2c|group|channel):/i.test(rest)) return true;
+          if (/^[0-9a-fA-F]{32}$/.test(rest)) return true;
+          const openIdPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+          if (openIdPattern.test(rest)) return true;
         }
-        // 不带前缀但有类型标识
-        if (/^(c2c|group|channel):/i.test(id)) {
-          return true;
-        }
-        // 32位十六进制 openid（不带连字符）
-        if (/^[0-9a-fA-F]{32}$/.test(id)) {
-          return true;
-        }
-        // UUID 格式的 openid（带连字符）
+        // 不带 umibot: 前缀
+        if (/^(c2c|group|channel):/i.test(id)) return true;
+        if (/^[0-9a-fA-F]{32}$/.test(id)) return true;
         const openIdPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
         return openIdPattern.test(id);
       },
-      hint: "UMI Bot 目标格式: umibot:c2c:openid (私聊) 或 umibot:group:groupid (群聊)",
+      hint: "UMI Bot 目标格式: umibot:openid (私聊) 或 umibot:group:groupid (群聊)",
     },
   },
   outbound: {
