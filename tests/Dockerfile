@@ -2,7 +2,7 @@ FROM node:22-slim
 
 ARG OPENCLAW_VERSION=latest
 
-LABEL maintainer="sliverp"
+LABEL maintainer="mili-wang"
 LABEL description="OpenClaw + UMIBot plugin E2E test environment"
 
 # 确保 npm 全局 bin 在 PATH 中

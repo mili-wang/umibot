@@ -144,7 +144,7 @@ function upgrade() {
 
   // 自动安装插件
   console.log('\n[1/2] 安装新版本插件...');
-  runCommand(foundInstallation, ['plugins', 'install', '@sliverp/umibot']);
+  runCommand(foundInstallation, ['plugins', 'install', '@mili-wang/umibot']);
 
   // 自动配置通道（使用保存的 appId 和 clientSecret）
   console.log('\n[2/2] 配置机器人通道...');
@@ -180,7 +180,7 @@ function install() {
   }
 
   console.log(`\n使用 ${cmd} 安装插件...`);
-  runCommand(cmd, ['plugins', 'install', '@sliverp/umibot']);
+  runCommand(cmd, ['plugins', 'install', '@mili-wang/umibot']);
 
   console.log('\n=== 安装完成 ===');
   console.log('\n请配置机器人通道:');
@@ -193,15 +193,15 @@ function showHelp() {
 UMIBot CLI - QQ机器人插件管理工具
 
 用法:
-  npx @sliverp/umibot <命令>
+  npx @mili-wang/umibot <命令>
 
 命令:
   upgrade       清理旧版本插件（升级前执行）
   install       安装插件到 openclaw/clawdbot
 
 示例:
-  npx @sliverp/umibot upgrade
-  npx @sliverp/umibot install
+  npx @mili-wang/umibot upgrade
+  npx @mili-wang/umibot install
 `);
 }
 

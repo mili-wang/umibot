@@ -8,10 +8,10 @@
 
 **Connect your AI assistant to Umi — private chat, group chat, and rich media, all in one plugin.**
 
-[![npm version](https://img.shields.io/npm/v/@sliverp/umibot?color=blue&label=npm)](https://www.npmjs.com/package/@sliverp/umibot)
+[![npm version](https://img.shields.io/npm/v/@mili-wang/umibot?color=blue&label=npm)](https://www.npmjs.com/package/@mili-wang/umibot)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Umi Bot](https://img.shields.io/badge/Umi_Bot-API_v2-red)](https://bot.q.umi.com/wiki/)
-[![Platform](https://img.shields.io/badge/platform-OpenClaw-orange)](https://github.com/sliverp/openclaw)
+[![Platform](https://img.shields.io/badge/platform-OpenClaw-orange)](https://github.com/mili-wang/openclaw)
 [![Node.js](https://img.shields.io/badge/Node.js->=18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
@@ -133,7 +133,7 @@ Scan to join the Umi group chat
 
 <div align="center">
 
-[![Star History Chart](https://api.star-history.com/svg?repos=sliverp/umibot&type=date&legend=top-left)](https://www.star-history.com/#sliverp/umibot&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=mili-wang/umibot&type=date&legend=top-left)](https://www.star-history.com/#mili-wang/umibot&type=date&legend=top-left)
 
 </div>
 
@@ -165,10 +165,10 @@ Scan to join the Umi group chat
 
 ```bash
 # Via OpenClaw CLI (recommended)
-openclaw plugins install @sliverp/umibot@latest
+openclaw plugins install @mili-wang/umibot@latest
 
 # Or from source
-git clone https://github.com/sliverp/umibot.git && cd umibot
+git clone https://github.com/mili-wang/umibot.git && cd umibot
 openclaw plugins install .
 ```
 
@@ -354,13 +354,13 @@ STT supports two-level configuration with priority fallback:
 > For installations via `openclaw plugins install`
 
 ```bash
-openclaw plugins upgrade @sliverp/umibot@latest
+openclaw plugins upgrade @mili-wang/umibot@latest
 ```
 
 ### Via npx
 
 ```bash
-npx -y @sliverp/umibot@latest upgrade
+npx -y @mili-wang/umibot@latest upgrade
 ```
 
 ### Via upgrade-and-run.sh (One-Click)
@@ -410,7 +410,7 @@ bash ./pull-latest.sh --repo <git-url>          # use a different repo
 ### From Source (Manual)
 
 ```bash
-git clone https://github.com/sliverp/umibot.git && cd umibot
+git clone https://github.com/mili-wang/umibot.git && cd umibot
 bash ./scripts/upgrade.sh
 openclaw plugins install .
 openclaw channels add --channel umibot --token "AppID:AppSecret"

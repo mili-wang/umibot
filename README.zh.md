@@ -8,10 +8,10 @@
 
 **让你的 AI 助手接入 Umi — 私聊、群聊、富媒体，一个插件全搞定。**
 
-[![npm version](https://img.shields.io/npm/v/@sliverp/umibot?color=blue&label=npm)](https://www.npmjs.com/package/@sliverp/umibot)
+[![npm version](https://img.shields.io/npm/v/@mili-wang/umibot?color=blue&label=npm)](https://www.npmjs.com/package/@mili-wang/umibot)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Umi Bot](https://img.shields.io/badge/Umi_Bot-API_v2-red)](https://bot.q.umi.com/wiki/)
-[![Platform](https://img.shields.io/badge/platform-OpenClaw-orange)](https://github.com/sliverp/openclaw)
+[![Platform](https://img.shields.io/badge/platform-OpenClaw-orange)](https://github.com/mili-wang/openclaw)
 [![Node.js](https://img.shields.io/badge/Node.js->=18-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
@@ -130,7 +130,7 @@
 
 <div align="center">
 
-[![Star History Chart](https://api.star-history.com/svg?repos=sliverp/umibot&type=date&legend=top-left)](https://www.star-history.com/#sliverp/umibot&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=mili-wang/umibot&type=date&legend=top-left)](https://www.star-history.com/#mili-wang/umibot&type=date&legend=top-left)
 
 </div>
 
@@ -161,10 +161,10 @@
 
 ```bash
 # 通过 OpenClaw CLI 安装（推荐）
-openclaw plugins install @sliverp/umibot@latest
+openclaw plugins install @mili-wang/umibot@latest
 
 # 或从源码安装
-git clone https://github.com/sliverp/umibot.git && cd umibot
+git clone https://github.com/mili-wang/umibot.git && cd umibot
 openclaw plugins install .
 ```
 
@@ -350,13 +350,13 @@ STT 支持两级配置，按优先级查找：
 > 仅适用于通过 `openclaw plugins install` 安装的场景
 
 ```bash
-openclaw plugins upgrade @sliverp/umibot@latest
+openclaw plugins upgrade @mili-wang/umibot@latest
 ```
 
 ### 通过 npx 升级
 
 ```bash
-npx -y @sliverp/umibot@latest upgrade
+npx -y @mili-wang/umibot@latest upgrade
 ```
 
 ### 通过 upgrade-and-run.sh 一键升级
@@ -406,7 +406,7 @@ bash ./pull-latest.sh --repo <git-url>          # 使用其他仓库地址
 ### 从源码升级（手动）
 
 ```bash
-git clone https://github.com/sliverp/umibot.git && cd umibot
+git clone https://github.com/mili-wang/umibot.git && cd umibot
 bash ./scripts/upgrade.sh
 openclaw plugins install .
 openclaw channels add --channel umibot --token "AppID:AppSecret"
