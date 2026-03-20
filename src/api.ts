@@ -364,8 +364,8 @@ async function apiRequestWithRetry<T = unknown>(
 export async function getGatewayUrl(appId: string, appSecret: string): Promise<string> {
   // const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway");
   // console.log(`[umibot-api] getGatewayUrl: got url=${data?.url ?? "(empty)"}`);
-  return `wss://testaest-v1.umi6.com/ws/lobster?app_id=${appId}&app_secret=${appSecret}&source=claw`;
-  // return data.url;
+  // return `wss://testaest-v1.umi6.com/ws/lobster?app_id=${appId}&app_secret=${appSecret}&source=claw`;
+  return `wss://qyapi.umi6.com/ws/lobster?app_id=${appId}&app_secret=${appSecret}&source=claw`;
 }
 
 // ============ 消息发送接口 ============
