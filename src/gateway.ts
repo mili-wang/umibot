@@ -1256,7 +1256,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
           try {
             await sendWithTokenRetry(async (token) => {
               if (event.type === "c2c") {
-                await sendC2CMessage(token, event.senderId, errorText, event.messageId, event.room_id);
+                await sendC2CMessage(token, event.senderId, errorText, account.umi6Sn, event.messageId, event.room_id);
               } else if (event.type === "group" && event.groupOpenid) {
                 await sendGroupMessage(token, event.groupOpenid, errorText, event.messageId);
               } else if (event.channelId) {
@@ -1371,7 +1371,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                       try {
                         await sendWithTokenRetry(async (token) => {
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, fallback, event.messageId);
+                            await sendC2CMessage(token, event.senderId, fallback, account.umi6Sn, event.messageId);
                           } else if (event.type === "group" && event.groupOpenid) {
                             await sendGroupMessage(token, event.groupOpenid, fallback, event.messageId);
                           } else if (event.channelId) {
@@ -1523,7 +1523,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                         await sendWithTokenRetry(async (token) => {
                           const ref = consumeQuoteRef();
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, item.content, event.messageId, event.room_id, ref);
+                            await sendC2CMessage(token, event.senderId, item.content, account.umi6Sn, event.messageId, event.room_id, ref);
                           } else if (event.type === "group" && event.groupOpenid) {
                             await sendGroupMessage(token, event.groupOpenid, item.content, event.messageId, ref);
                           } else if (event.channelId) {
@@ -1566,7 +1566,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                               await sendWithTokenRetry(async (token) => {
                                 const hint = `⏳ 正在上传图片 (${formatFileSize(imgSizeCheck.size)})...`;
                                 if (event.type === "c2c") {
-                                  await sendC2CMessage(token, event.senderId, hint, event.messageId, event.room_id);
+                                  await sendC2CMessage(token, event.senderId, hint, account.umi6Sn, event.messageId, event.room_id);
                                 } else if (event.type === "group" && event.groupOpenid) {
                                   await sendGroupMessage(token, event.groupOpenid, hint, event.messageId);
                                 }
@@ -1670,7 +1670,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                               await sendWithTokenRetry(async (token) => {
                                 const hint = `⏳ 正在上传视频 (${formatFileSize(vidCheck.size)})...`;
                                 if (event.type === "c2c") {
-                                  await sendC2CMessage(token, event.senderId, hint, event.messageId, event.room_id);
+                                  await sendC2CMessage(token, event.senderId, hint, account.umi6Sn, event.messageId, event.room_id);
                                 } else if (event.type === "group" && event.groupOpenid) {
                                   await sendGroupMessage(token, event.groupOpenid, hint, event.messageId);
                                 }
@@ -1732,7 +1732,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                               await sendWithTokenRetry(async (token) => {
                                 const hint = `⏳ 正在上传文件 ${fileName} (${formatFileSize(fileCheck.size)})...`;
                                 if (event.type === "c2c") {
-                                  await sendC2CMessage(token, event.senderId, hint, event.messageId);
+                                  await sendC2CMessage(token, event.senderId, hint, account.umi6Sn, event.messageId);
                                 } else if (event.type === "group" && event.groupOpenid) {
                                   await sendGroupMessage(token, event.groupOpenid, hint, event.messageId);
                                 }
@@ -1820,7 +1820,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                       try {
                         await sendWithTokenRetry(async (token) => {
                           if (event.type === "c2c") {
-                            await sendC2CMessage(token, event.senderId, confirmText, event.messageId, event.room_id);
+                            await sendC2CMessage(token, event.senderId, confirmText, account.umi6Sn, event.messageId, event.room_id);
                           } else if (event.type === "group" && event.groupOpenid) {
                             await sendGroupMessage(token, event.groupOpenid, confirmText, event.messageId);
                           } else if (event.channelId) {
@@ -1902,7 +1902,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                           if (parsedPayload.caption) {
                             await sendWithTokenRetry(async (token) => {
                               if (event.type === "c2c") {
-                                await sendC2CMessage(token, event.senderId, parsedPayload.caption!, event.messageId, event.room_id);
+                                await sendC2CMessage(token, event.senderId, parsedPayload.caption!, account.umi6Sn, event.messageId, event.room_id);
                               } else if (event.type === "group" && event.groupOpenid) {
                                 await sendGroupMessage(token, event.groupOpenid, parsedPayload.caption!, event.messageId);
                               } else if (event.channelId) {
@@ -1995,7 +1995,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                             if (parsedPayload.caption) {
                               await sendWithTokenRetry(async (token) => {
                                 if (event.type === "c2c") {
-                                  await sendC2CMessage(token, event.senderId, parsedPayload.caption!, event.messageId, event.room_id);
+                                  await sendC2CMessage(token, event.senderId, parsedPayload.caption!, account.umi6Sn, event.messageId, event.room_id);
                                 } else if (event.type === "group" && event.groupOpenid) {
                                   await sendGroupMessage(token, event.groupOpenid, parsedPayload.caption!, event.messageId);
                                 } else if (event.channelId) {
@@ -2297,7 +2297,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                       await sendWithTokenRetry(async (token) => {
                         const ref = consumeQuoteRef();
                         if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId, event.room_id, ref);
+                          await sendC2CMessage(token, event.senderId, textWithoutImages, account.umi6Sn, event.messageId, event.room_id, ref);
                         } else if (event.type === "group" && event.groupOpenid) {
                           await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId, ref);
                         } else if (event.channelId) {
@@ -2350,7 +2350,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
                       await sendWithTokenRetry(async (token) => {
                         const ref = consumeQuoteRef();
                         if (event.type === "c2c") {
-                          await sendC2CMessage(token, event.senderId, textWithoutImages, event.messageId, event.room_id, ref);
+                          await sendC2CMessage(token, event.senderId, textWithoutImages, account.umi6Sn, event.messageId, event.room_id, ref);
                         } else if (event.type === "group" && event.groupOpenid) {
                           await sendGroupMessage(token, event.groupOpenid, textWithoutImages, event.messageId, ref);
                         } else if (event.channelId) {

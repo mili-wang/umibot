@@ -441,13 +441,14 @@ export async function sendC2CMessage(
   accessToken: string,
   openid: string,
   content: string,
+  umi6Sn: string,
   msgId?: string,
   room_id?: string,
   messageReference?: string
 ): Promise<MessageResponse> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   const body = buildMessageBody(accessToken, content, msgId, msgSeq, openid, room_id, messageReference);
-  return sendAndNotify(accessToken, "POST", `/sn_vlrykm_soojj97v_dpjxey/api/lobster.Content/create`, body, { text: content });
+  return sendAndNotify(accessToken, "POST", `/${umi6Sn}/api/lobster.Content/create`, body, { text: content });
 }
 
 export async function sendC2CInputNotify(

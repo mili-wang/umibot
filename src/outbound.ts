@@ -398,7 +398,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
           if (replyToId) {
             // 被动回复
             if (target.type === "c2c") {
-              const result = await sendC2CMessage(accessToken, target.id, item.content, replyToId);
+              const result = await sendC2CMessage(accessToken, target.id, item.content, account.umi6Sn, replyToId);
               recordMessageReply(replyToId);
               lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
             } else if (target.type === "group") {
@@ -482,7 +482,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
             // 发送友好提示给用户
             try {
               if (target.type === "c2c") {
-                await sendC2CMessage(accessToken, target.id, "语音生成失败，请稍后重试", replyToId ?? undefined);
+                await sendC2CMessage(accessToken, target.id, "语音生成失败，请稍后重试", account.umi6Sn, replyToId ?? undefined);
               } else if (target.type === "group") {
                 await sendGroupMessage(accessToken, target.id, "语音生成失败，请稍后重试", replyToId ?? undefined);
               }
@@ -497,7 +497,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
             console.error(`[umibot] sendText: Voice conversion to SILK failed: ${ext} (${fileSize} bytes)`);
             try {
               if (target.type === "c2c") {
-                await sendC2CMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", replyToId ?? undefined);
+                await sendC2CMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", account.umi6Sn, replyToId ?? undefined);
               } else if (target.type === "group") {
                 await sendGroupMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", replyToId ?? undefined);
               }
@@ -550,7 +550,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
               try {
                 const hint = `⏳ 正在上传视频 (${formatFileSize(videoSizeCheck.size)})...`;
                 if (target.type === "c2c") {
-                  await sendC2CMessage(accessToken, target.id, hint, replyToId ?? undefined);
+                  await sendC2CMessage(accessToken, target.id, hint, account.umi6Sn, replyToId ?? undefined);
                 } else if (target.type === "group") {
                   await sendGroupMessage(accessToken, target.id, hint, replyToId ?? undefined);
                 }
@@ -606,7 +606,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
               try {
                 const hint = `⏳ 正在上传文件 ${fileName} (${formatFileSize(fileSizeCheck.size)})...`;
                 if (target.type === "c2c") {
-                  await sendC2CMessage(accessToken, target.id, hint, replyToId ?? undefined);
+                  await sendC2CMessage(accessToken, target.id, hint, account.umi6Sn, replyToId ?? undefined);
                 } else if (target.type === "group") {
                   await sendGroupMessage(accessToken, target.id, hint, replyToId ?? undefined);
                 }
@@ -684,7 +684,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
 
     // 有 replyToId，使用被动回复接口
     if (target.type === "c2c") {
-      const result = await sendC2CMessage(accessToken, target.id, text, replyToId);
+      const result = await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
@@ -923,7 +923,7 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
         } else if (target.type === "group") {
           await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
         }
@@ -999,7 +999,7 @@ async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult>
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
         } else if (target.type === "group") {
           await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
         }
@@ -1061,7 +1061,7 @@ async function sendVideoUrl(ctx: MediaOutboundContext): Promise<OutboundResult> 
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
         } else if (target.type === "group") {
           await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
         }
@@ -1124,7 +1124,7 @@ async function sendVideoFile(ctx: MediaOutboundContext): Promise<OutboundResult>
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
         } else if (target.type === "group") {
           await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
         }
@@ -1210,7 +1210,7 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
     if (text?.trim()) {
       try {
         if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, replyToId ?? undefined);
+          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
         } else if (target.type === "group") {
           await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
         }
