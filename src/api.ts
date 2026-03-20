@@ -6,8 +6,10 @@
 import { computeFileHash, getCachedFileInfo, setCachedFileInfo } from "./utils/upload-cache.js";
 import { sanitizeFileName } from "./utils/platform.js";
 
-const API_BASE = "https://testaest-v1.umi6.com";
-const TOKEN_URL = "https://testaest-v1.umi6.com/sn_vlrykm_soojj97v_dpjxey/api/lobster.auth/getAppToken";
+// 测试环境
+// const API_BASE = "https://testaest-v1.umi6.com";
+// 生产环境
+const API_BASE = "https://qyapi.umi6.com";
 
 // 运行时配置
 let currentMarkdownSupport = false;
@@ -59,7 +61,10 @@ export function isMarkdownSupport(): boolean {
 // =========================================================================
 // 🚀 [核心修复] 将全局状态改为 Map，按 appId 隔离，彻底解决多账号串号问题
 // =========================================================================
-const tokenCacheMap = new Map<string, { token: string; expiresAt: number; appId: string }>();
+const tokenCacheMap = new Map<
+  string,
+  { token: string; expiresAt: number; appId: string; domain?: string }
+>();
 const tokenFetchPromises = new Map<string, Promise<string>>();
 
 /**
@@ -70,7 +75,7 @@ const tokenFetchPromises = new Map<string, Promise<string>>();
  * 
  * 按 appId 隔离，支持多机器人并发请求。
  */
-export async function getAccessToken(appId: string, clientSecret: string): Promise<string> {
+export async function getAccessToken(appId: string, clientSecret: string, umi6Sn: string): Promise<string> {
   const normalizedAppId = String(appId).trim();
   const cachedToken = tokenCacheMap.get(normalizedAppId);
 
@@ -89,7 +94,7 @@ export async function getAccessToken(appId: string, clientSecret: string): Promi
   // 创建新的 Token 获取 Promise（singleflight 入口）
   fetchPromise = (async () => {
     try {
-      return await doFetchToken(normalizedAppId, clientSecret);
+      return await doFetchToken(normalizedAppId, clientSecret, umi6Sn);
     } finally {
       // 无论成功失败，都清除 Promise 缓存
       tokenFetchPromises.delete(normalizedAppId);
@@ -103,10 +108,10 @@ export async function getAccessToken(appId: string, clientSecret: string): Promi
 /**
  * 实际执行 Token 获取的内部函数
  */
-async function doFetchToken(appId: string, clientSecret: string): Promise<string> {
-  const requestBody = { app_id: appId, app_secret: clientSecret };
+async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string): Promise<string> {
+  const requestBody = { app_id: appId, app_secret: clientSecret, umi6_sn: umi6Sn };
   const requestHeaders = { "Content-Type": "application/json" };
-  
+  const TOKEN_URL = `${API_BASE}/${umi6Sn}/api/lobster.auth/getAppToken`;
   // 打印请求信息（隐藏敏感信息）
   console.log(`[umibot-api:${appId}] >>> POST ${TOKEN_URL}`);
 
@@ -130,14 +135,18 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
   const tokenTraceId = response.headers.get("x-tps-trace-id") ?? "";
   console.log(`[umibot-api:${appId}] <<< Status: ${response.status} ${response.statusText}${tokenTraceId ? ` | TraceId: ${tokenTraceId}` : ""}`);
 
-  let data: { access_token?: string; expires_in?: number };
+  let data: { access_token?: string; expires_in?: number; domain?: string };
   let rawBody: string;
   try {
     rawBody = await response.text();
     // 隐藏 token 值
     const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"');
     console.log(`[umibot-api:${appId}] <<< Body:`, logBody);
-    data = JSON.parse(rawBody)?.data as { access_token?: string; expires_in?: number };
+    data = JSON.parse(rawBody)?.data as {
+      access_token?: string;
+      expires_in?: number;
+      domain?: string;
+    };
   } catch (err) {
     console.error(`[umibot-api:${appId}] <<< Parse error:`, err);
     throw new Error(`Failed to parse access_token response: ${err instanceof Error ? err.message : String(err)}`);
@@ -153,6 +162,7 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
     token: data.access_token,
     expiresAt,
     appId,
+    domain: data.domain
   });
 
   console.log(`[umibot-api:${appId}] Token cached, expires at: ${new Date(expiresAt).toISOString()}`);
@@ -177,6 +187,22 @@ export function clearTokenCache(appId?: string): void {
 /**
  * 获取 Token 缓存状态（用于监控）
  */
+/**
+ * 鉴权接口返回的 data.domain（仅在成功拉取 token 后写入缓存）。
+ * 用于 WebSocket Custom-Origin 等需要与租户域一致的场景。
+ */
+export function getCachedAuthDomain(appId: string): string | undefined {
+  const id = String(appId).trim();
+  return tokenCacheMap.get(id)?.domain;
+}
+
+/**
+ * 将鉴权返回的 domain 规范为 Custom-Origin 可用的完整 URL（无 domain 时返回 undefined）。
+ */
+export function getCachedCustomOrigin(appId: string): string | undefined {
+  return getCachedAuthDomain(appId)?.trim();
+}
+
 export function getTokenStatus(appId: string): { status: "valid" | "expired" | "refreshing" | "none"; expiresAt: number | null } {
   if (tokenFetchPromises.has(appId)) {
     return { status: "refreshing", expiresAt: tokenCacheMap.get(appId)?.expiresAt ?? null };
@@ -712,6 +738,7 @@ const backgroundRefreshControllers = new Map<string, AbortController>();
 export function startBackgroundTokenRefresh(
   appId: string,
   clientSecret: string,
+  umi6Sn: string,
   options?: BackgroundTokenRefreshOptions
 ): void {
   if (backgroundRefreshControllers.has(appId)) {
@@ -736,7 +763,7 @@ export function startBackgroundTokenRefresh(
 
     while (!signal.aborted) {
       try {
-        await getAccessToken(appId, clientSecret);
+        await getAccessToken(appId, clientSecret, umi6Sn);
         const cached = tokenCacheMap.get(appId);
 
         if (cached) {

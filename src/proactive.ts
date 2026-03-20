@@ -314,7 +314,7 @@ export async function sendProactive(
   }
   
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     
     // 如果有图片，先发送图片
     if (imageUrl) {
@@ -487,7 +487,7 @@ export async function sendProactiveMessageDirect(
   }
   
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     
     let result: { id: string; timestamp: number | string };
     

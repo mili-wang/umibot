@@ -2,7 +2,7 @@ import WebSocket from "ws";
 import path from "node:path";
 import * as fs from "node:fs";
 import type { ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
-import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, sendC2CImageMessage, sendGroupImageMessage, sendC2CVoiceMessage, sendGroupVoiceMessage, sendC2CVideoMessage, sendGroupVideoMessage, sendC2CFileMessage, sendGroupFileMessage, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify, onMessageSent } from "./api.js";
+import { getAccessToken, getCachedCustomOrigin, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, sendC2CImageMessage, sendGroupImageMessage, sendC2CVoiceMessage, sendGroupVoiceMessage, sendC2CVideoMessage, sendGroupVideoMessage, sendC2CFileMessage, sendGroupFileMessage, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify, onMessageSent } from "./api.js";
 import { loadSession, saveSession, clearSession, type SessionState } from "./session-store.js";
 import { recordKnownUser, flushKnownUsers } from "./known-users.js";
 import { getQQBotRuntime } from "./runtime.js";
@@ -692,15 +692,16 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         shouldRefreshToken = false;
       }
       
-      const accessToken = await getAccessToken(account.appId, account.clientSecret);
+      const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
       log?.info(`[umibot:${account.accountId}] ✅ Access token obtained successfully`);
       const gatewayUrl = await getGatewayUrl(account.appId, account.clientSecret);
+      const customOrigin = getCachedCustomOrigin(account.appId);
 
       log?.info(`[umibot:${account.accountId}] Connecting to ${gatewayUrl}`);
 
       const ws = new WebSocket(gatewayUrl, {
         headers: {
-          "Custom-Origin": "https://dpjxey.testaigc.umi6.com",
+          "Custom-Origin": customOrigin,
         },
       });
       currentWs = ws;
@@ -738,7 +739,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         // 发送输入状态提示（非关键，失败不影响主流程）
         try {
-          let token = await getAccessToken(account.appId, account.clientSecret);
+          let token = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
           // try {
           //   await sendC2CInputNotify(token, event.senderId, event.messageId, 60);
           //   console.log(`[umibot-gateway] sendC2CInputNotify: ${token} ${event.senderId} ${event.messageId}`);
@@ -1234,7 +1235,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
         // 发送消息的辅助函数，带 token 过期重试
         const sendWithTokenRetry = async (sendFn: (token: string) => Promise<unknown>) => {
           try {
-            const token = await getAccessToken(account.appId, account.clientSecret);
+            const token = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
             await sendFn(token);
           } catch (err) {
             const errMsg = String(err);
@@ -1242,7 +1243,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
             if (errMsg.includes("401") || errMsg.includes("token") || errMsg.includes("access_token")) {
               log?.info(`[umibot:${account.accountId}] Token may be expired, refreshing...`);
               clearTokenCache(account.appId);
-              const newToken = await getAccessToken(account.appId, account.clientSecret);
+              const newToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
               await sendFn(newToken);
             } else {
               throw err;
@@ -2430,7 +2431,7 @@ ${ttsHint}${sttHint}${asrFallbackHint}${voiceForwardHint}`;
         // 启动消息处理器（异步处理，防止阻塞心跳）
         startMessageProcessor(handleMessage);
         // P1-1: 启动后台 Token 刷新
-        startBackgroundTokenRefresh(account.appId, account.clientSecret, {
+        startBackgroundTokenRefresh(account.appId, account.clientSecret, account.umi6Sn, {
           log: log as { info: (msg: string) => void; error: (msg: string) => void; debug?: (msg: string) => void },
         });
       });

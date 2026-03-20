@@ -67,6 +67,7 @@ export function resolveQQBotAccount(
   let accountConfig: QQBotAccountConfig = {};
   let appId = "";
   let clientSecret = "";
+  let umi6Sn = "";
   let secretSource: "config" | "file" | "env" | "none" = "none";
 
   if (resolvedAccountId === DEFAULT_ACCOUNT_ID) {
@@ -76,6 +77,7 @@ export function resolveQQBotAccount(
       name: umibot?.name,
       appId: umibot?.appId,
       clientSecret: umibot?.clientSecret,
+      umi6Sn: umibot?.umi6Sn,
       clientSecretFile: umibot?.clientSecretFile,
       dmPolicy: umibot?.dmPolicy,
       allowFrom: umibot?.allowFrom,
@@ -94,6 +96,7 @@ export function resolveQQBotAccount(
   // 解析 clientSecret
   if (accountConfig.clientSecret) {
     clientSecret = accountConfig.clientSecret;
+    umi6Sn = accountConfig.umi6Sn ?? "";
     secretSource = "config";
   } else if (accountConfig.clientSecretFile) {
     // 从文件读取（运行时处理）
@@ -114,6 +117,7 @@ export function resolveQQBotAccount(
     enabled: accountConfig.enabled !== false,
     appId,
     clientSecret,
+    umi6Sn,
     secretSource,
     systemPrompt: accountConfig.systemPrompt,
     imageServerBaseUrl: accountConfig.imageServerBaseUrl || process.env.QQBOT_IMAGE_SERVER_BASE_URL,

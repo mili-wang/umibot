@@ -387,7 +387,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
       return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
     }
     
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     const target = parseTarget(to);
     let lastResult: OutboundResult = { channel: "umibot" };
     
@@ -661,7 +661,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
   }
 
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     const target = parseTarget(to);
     console.log("[umibot] sendText target:", JSON.stringify(target));
 
@@ -729,7 +729,7 @@ export async function sendProactiveMessage(
 
   try {
     console.log(`[${timestamp}] [umibot] sendProactiveMessage: getting access token for appId=${account.appId}`);
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     
     console.log(`[${timestamp}] [umibot] sendProactiveMessage: parsing target=${to}`);
     const target = parseTarget(to);
@@ -901,7 +901,7 @@ export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResu
   }
 
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     const target = parseTarget(to);
 
     let imageResult: { id: string; timestamp: number | string };
@@ -964,7 +964,7 @@ async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult>
       const fallbackBase64 = buf.toString("base64");
       console.log(`[umibot] sendVoiceFile: not SILK format, uploading raw file (${formatFileSize(buf.length)})`);
 
-      const accessToken = await getAccessToken(account.appId!, account.clientSecret!);
+      const accessToken = await getAccessToken(account.appId!, account.clientSecret!, account.umi6Sn);
       const target = parseTarget(to);
 
       let result: { id: string; timestamp: number | string };
@@ -982,7 +982,7 @@ async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult>
 
     console.log(`[umibot] sendVoiceFile: SILK format ready, uploading...`);
 
-    const accessToken = await getAccessToken(account.appId!, account.clientSecret!);
+    const accessToken = await getAccessToken(account.appId!, account.clientSecret!, account.umi6Sn);
     const target = parseTarget(to);
 
     let voiceResult: { id: string; timestamp: number | string };
@@ -1044,7 +1044,7 @@ async function sendVideoUrl(ctx: MediaOutboundContext): Promise<OutboundResult> 
   }
 
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     const target = parseTarget(to);
 
     let videoResult: { id: string; timestamp: number | string };
@@ -1107,7 +1107,7 @@ async function sendVideoFile(ctx: MediaOutboundContext): Promise<OutboundResult>
     const videoBase64 = fileBuffer.toString("base64");
     console.log(`[umibot] sendVideoFile: Read local video (${formatFileSize(fileBuffer.length)})`);
 
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     const target = parseTarget(to);
 
     let videoResult: { id: string; timestamp: number | string };
@@ -1160,7 +1160,7 @@ async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResu
   const fileName = sanitizeFileName(path.basename(mediaUrl));
 
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret);
+    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
     const target = parseTarget(to);
 
     let fileResult: { id: string; timestamp: number | string };

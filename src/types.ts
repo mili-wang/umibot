@@ -13,6 +13,7 @@ export interface QQBotConfig {
 export interface ResolvedQQBotAccount {
   accountId: string;
   name?: string;
+  umi6Sn: string;
   enabled: boolean;
   appId: string;
   clientSecret: string;
@@ -33,6 +34,7 @@ export interface QQBotAccountConfig {
   enabled?: boolean;
   name?: string;
   appId?: string;
+  umi6Sn?: string;
   clientSecret?: string;
   clientSecretFile?: string;
   dmPolicy?: "open" | "pairing" | "allowlist";
