@@ -28,8 +28,8 @@ echo.
 echo === Cleanup Complete ===
 echo.
 echo Run these commands to reinstall:
-for %%I in ("%~dp0..") do set "qqbotDir=%%~fI"
-echo   cd %qqbotDir%
+for %%I in ("%~dp0..") do set "umibotDir=%%~fI"
+echo   cd %umibotDir%
 echo   %cmd% plugins install .
 echo   %cmd% channels add --channel umibot --token "AppID:AppSecret"
 echo   %cmd% gateway restart

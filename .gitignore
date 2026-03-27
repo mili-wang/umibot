@@ -6,7 +6,6 @@ package-lock.json
 .codebuddy/
 .codebuddy.zip
 openclaw.json
-
-# E2E tests
-tests/.env
-tests/reports/
+*.tgz
+*.log
+pnpm-lock.yaml

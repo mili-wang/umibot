@@ -1,10 +1,7 @@
 import {
   type ChannelPlugin,
   type OpenClawConfig,
-  applyAccountNameToChannelSection,
-  deleteAccountFromConfigSection,
-  setAccountEnabledInConfigSection,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 
 import type { ResolvedQQBotAccount } from "./types.js";
 import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, applyQQBotAccountConfig, resolveDefaultQQBotAccountId } from "./config.js";
@@ -12,39 +9,92 @@ import { sendText, sendMedia } from "./outbound.js";
 import { startGateway } from "./gateway.js";
 import { umibotOnboardingAdapter } from "./onboarding.js";
 import { getQQBotRuntime } from "./runtime.js";
+import { saveCredentialBackup, loadCredentialBackup } from "./credential-backup.js";
+import { initApiConfig } from "./api.js";
+
+function setAccountEnabledInConfigSection(ctx: {
+  cfg: OpenClawConfig;
+  sectionKey: string;
+  accountId: string;
+  enabled: boolean;
+  allowTopLevel?: boolean;
+}): OpenClawConfig {
+  const { cfg, sectionKey, accountId, enabled, allowTopLevel } = ctx;
+  const nextCfg = { ...cfg } as OpenClawConfig;
+  const channels = { ...(nextCfg.channels ?? {}) } as Record<string, unknown>;
+  const section = { ...((channels[sectionKey] as Record<string, unknown> | undefined) ?? {}) };
+  const accounts = { ...((section.accounts as Record<string, Record<string, unknown>> | undefined) ?? {}) };
+  const entry = { ...(accounts[accountId] ?? {}) };
+  entry.enabled = enabled;
+  accounts[accountId] = entry;
+  section.accounts = accounts;
+  if (allowTopLevel && accountId === DEFAULT_ACCOUNT_ID) {
+    section.enabled = enabled;
+  }
+  channels[sectionKey] = section;
+  nextCfg.channels = channels as OpenClawConfig["channels"];
+  return nextCfg;
+}
+
+function deleteAccountFromConfigSection(ctx: {
+  cfg: OpenClawConfig;
+  sectionKey: string;
+  accountId: string;
+  clearBaseFields?: string[];
+}): OpenClawConfig {
+  const { cfg, sectionKey, accountId, clearBaseFields } = ctx;
+  const nextCfg = { ...cfg } as OpenClawConfig;
+  const channels = { ...(nextCfg.channels ?? {}) } as Record<string, unknown>;
+  const section = { ...((channels[sectionKey] as Record<string, unknown> | undefined) ?? {}) };
+  const accounts = { ...((section.accounts as Record<string, Record<string, unknown>> | undefined) ?? {}) };
+  if (accounts[accountId]) {
+    delete accounts[accountId];
+    section.accounts = accounts;
+  }
+  if (accountId === DEFAULT_ACCOUNT_ID && clearBaseFields?.length) {
+    for (const field of clearBaseFields) {
+      delete section[field];
+    }
+  }
+  channels[sectionKey] = section;
+  nextCfg.channels = channels as OpenClawConfig["channels"];
+  return nextCfg;
+}
+
+function applyAccountNameToChannelSection(ctx: {
+  cfg: OpenClawConfig;
+  channelKey: string;
+  accountId: string;
+  name: string;
+}): OpenClawConfig {
+  const { cfg, channelKey, accountId, name } = ctx;
+  const nextCfg = { ...cfg } as OpenClawConfig;
+  const channels = { ...(nextCfg.channels ?? {}) } as Record<string, unknown>;
+  const section = { ...((channels[channelKey] as Record<string, unknown> | undefined) ?? {}) };
+  const accounts = { ...((section.accounts as Record<string, Record<string, unknown>> | undefined) ?? {}) };
+  const entry = { ...(accounts[accountId] ?? {}) };
+  entry.name = name;
+  accounts[accountId] = entry;
+  section.accounts = accounts;
+  if (accountId === DEFAULT_ACCOUNT_ID) {
+    section.name = name;
+  }
+  channels[channelKey] = section;
+  nextCfg.channels = channels as OpenClawConfig["channels"];
+  return nextCfg;
+}
+
+/** UMI Bot 单条消息文本长度上限 */
+export const TEXT_CHUNK_LIMIT = 5000;
 
 /**
- * 简单的文本分块函数
- * 用于预先分块长文本
+ * Markdown 感知的文本分块函数
+ * 委托给 SDK 内置的 channel.text.chunkMarkdownText
+ * 支持代码块自动关闭/重开、括号感知等
  */
-function chunkText(text: string, limit: number): string[] {
-  if (text.length <= limit) return [text];
-  
-  const chunks: string[] = [];
-  let remaining = text;
-  
-  while (remaining.length > 0) {
-    if (remaining.length <= limit) {
-      chunks.push(remaining);
-      break;
-    }
-    
-    // 尝试在换行处分割
-    let splitAt = remaining.lastIndexOf("\n", limit);
-    if (splitAt <= 0 || splitAt < limit * 0.5) {
-      // 没找到合适的换行，尝试在空格处分割
-      splitAt = remaining.lastIndexOf(" ", limit);
-    }
-    if (splitAt <= 0 || splitAt < limit * 0.5) {
-      // 还是没找到，强制在 limit 处分割
-      splitAt = limit;
-    }
-    
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt).trimStart();
-  }
-  
-  return chunks;
+export function chunkText(text: string, limit: number): string[] {
+  const runtime = getQQBotRuntime();
+  return runtime.channel.text.chunkMarkdownText(text, limit);
 }
 
 export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
@@ -66,10 +116,11 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
      * blockStreaming: true 表示该 Channel 支持块流式
      * 框架会收集流式响应，然后通过 deliver 回调发送
      */
-    blockStreaming: false,
+    blockStreaming: true,
   },
   reload: { configPrefixes: ["channels.umibot"] },
   // CLI onboarding wizard
+  // @ts-expect-error onboarding removed from ChannelPlugin type in 2026.3.23 but still supported at runtime
   onboarding: umibotOnboardingAdapter,
 
   config: {
@@ -93,7 +144,12 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         accountId,
         clearBaseFields: ["appId", "clientSecret", "clientSecretFile", "name"],
       }),
-    isConfigured: (account) => Boolean(account?.appId && account?.clientSecret),
+    isConfigured: (account) => {
+      if (account?.appId && account?.clientSecret) return true;
+      // 配置为空但有凭证备份时仍返回 true，让 startAccount 有机会恢复凭证
+      const backup = loadCredentialBackup(account?.accountId);
+      return backup !== null;
+    },
     describeAccount: (account) => ({
       accountId: account?.accountId ?? DEFAULT_ACCOUNT_ID,
       name: account?.name,
@@ -102,11 +158,11 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       tokenSource: account?.secretSource,
     }),
     // 关键：解析 allowFrom 配置，用于命令授权
-    resolveAllowFrom: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) => {
-      const account = resolveQQBotAccount(cfg, accountId);
+    resolveAllowFrom: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string | null }) => {
+      const account = resolveQQBotAccount(cfg, accountId ?? undefined);
       const allowFrom = account.config?.allowFrom ?? [];
       console.log(`[umibot] resolveAllowFrom: accountId=${accountId}, allowFrom=${JSON.stringify(allowFrom)}`);
-      return allowFrom.map((entry: string | number) => String(entry));
+      return allowFrom.map((entry: string | number) => String(entry)) as (string | number)[];
     },
     // 格式化 allowFrom 条目（移除 umibot: 前缀，统一大写）
     formatAllowFrom: ({ allowFrom }: { allowFrom: Array<string | number> }) =>
@@ -125,7 +181,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         cfg,
         channelKey: "umibot",
         accountId,
-        name,
+        name: name ?? "",
       }),
     validateInput: ({ input }) => {
       if (!input.token && !input.tokenFile && !input.useEnv) {
@@ -150,8 +206,8 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         clientSecret,
         clientSecretFile: input.tokenFile,
         name: input.name,
-        imageServerBaseUrl: input.imageServerBaseUrl,
-      });
+        imageServerBaseUrl: (input as Record<string, unknown>).imageServerBaseUrl as string | undefined,
+      }) as OpenClawConfig;
     },
   },
   // Messaging 配置：用于解析目标地址
@@ -191,8 +247,8 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       if (openIdUuidPattern.test(id)) {
         return `umibot:${id}`;
       }
-
-      // 不认识的格式
+      
+      // 不认识的格式，返回 undefined 让核心使用原始值
       return undefined;
     },
     /**
@@ -229,38 +285,79 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   },
   outbound: {
     deliveryMode: "direct",
-    chunker: chunkText,
+    chunker: (text, limit) => getQQBotRuntime().channel.text.chunkMarkdownText(text, limit),
     chunkerMode: "markdown",
-    textChunkLimit: 2000,
-    sendText: async ({ to, text, accountId, replyToId, cfg }) => {
+    textChunkLimit: 5000,
+    sendText: async (ctx) => {
+      const { to, text, accountId, replyToId, cfg } = ctx;
+      const roomId = (ctx as { roomId?: string }).roomId;
       console.log(`[umibot:channel] sendText called — accountId=${accountId}, to=${to}, replyToId=${replyToId}, text.length=${text?.length ?? 0}`);
       console.log(`[umibot:channel] sendText text preview: ${text?.slice(0, 100)}${(text?.length ?? 0) > 100 ? "..." : ""}`);
-      const account = resolveQQBotAccount(cfg, accountId);
+      const account = resolveQQBotAccount(cfg, accountId ?? undefined);
+      initApiConfig({ markdownSupport: account.markdownSupport });
       console.log(`[umibot:channel] sendText resolved account: id=${account.accountId}, appId=${account.appId}, enabled=${account.enabled}`);
-      const result = await sendText({ to, text, accountId, replyToId, account });
+      const result = await sendText({ to, text, accountId, replyToId, roomId, account });
       console.log(`[umibot:channel] sendText result: messageId=${result.messageId}, error=${result.error ?? "none"}`);
+      if (result.error) throw new Error(result.error);
       return {
-        channel: "umibot",
-        messageId: result.messageId,
-        error: result.error ? new Error(result.error) : undefined,
+        channel: "umibot" as const,
+        messageId: result.messageId ?? "",
       };
     },
-    sendMedia: async ({ to, text, mediaUrl, accountId, replyToId, cfg }) => {
+    sendMedia: async (ctx) => {
+      const { to, text, mediaUrl, accountId, replyToId, cfg } = ctx;
+      const roomId = (ctx as { roomId?: string }).roomId;
       console.log(`[umibot:channel] sendMedia called — accountId=${accountId}, to=${to}, replyToId=${replyToId}, mediaUrl=${mediaUrl?.slice(0, 80)}, text.length=${text?.length ?? 0}`);
-      const account = resolveQQBotAccount(cfg, accountId);
+      const account = resolveQQBotAccount(cfg, accountId ?? undefined);
+      initApiConfig({ markdownSupport: account.markdownSupport });
       console.log(`[umibot:channel] sendMedia resolved account: id=${account.accountId}, appId=${account.appId}, enabled=${account.enabled}`);
-      const result = await sendMedia({ to, text: text ?? "", mediaUrl: mediaUrl ?? "", accountId, replyToId, account });
+      const result = await sendMedia({ to, text: text ?? "", mediaUrl: mediaUrl ?? "", accountId, replyToId, roomId, account });
       console.log(`[umibot:channel] sendMedia result: messageId=${result.messageId}, error=${result.error ?? "none"}`);
+      // 此 sendMedia 是框架 Channel Plugin 的标准出站接口，
+      // 用于非 gateway deliver 场景（如 API 直接发送、cron 等）。
+      // gateway 消息响应走的是 deliver 回调 → sendPlainReply，不经过此处。
+      // 框架拿到 error 后不一定会给用户发文字兜底，所以这里主动发一条。
+      if (result.error) {
+        try {
+          const fallbackResult = await sendText({ to, text: result.error, accountId, replyToId, roomId, account });
+          console.log(`[umibot:channel] sendMedia fallback text sent: messageId=${fallbackResult.messageId}, error=${fallbackResult.error ?? "none"}`);
+        } catch (fallbackErr) {
+          console.error(`[umibot:channel] sendMedia fallback text failed: ${fallbackErr}`);
+        }
+        throw new Error(result.error);
+      }
       return {
-        channel: "umibot",
-        messageId: result.messageId,
-        error: result.error ? new Error(result.error) : undefined,
+        channel: "umibot" as const,
+        messageId: result.messageId ?? "",
       };
     },
   },
   gateway: {
     startAccount: async (ctx) => {
-      const { account, abortSignal, log, cfg } = ctx;
+      let { account } = ctx;
+      const { abortSignal, log, cfg } = ctx;
+
+      // 凭证恢复：如果 appId/secret 为空（热更新打断可能导致配置丢失），尝试从暂存文件恢复
+      if (!account.appId || !account.clientSecret) {
+        const backup = loadCredentialBackup(account.accountId);
+        if (backup) {
+          log?.info(`[umibot:${account.accountId}] 配置中凭证为空，从暂存文件恢复 (appId=${backup.appId}, savedAt=${backup.savedAt})`);
+          try {
+            const runtime = getQQBotRuntime();
+            const restoredCfg = applyQQBotAccountConfig(cfg, account.accountId, {
+              appId: backup.appId,
+              clientSecret: backup.clientSecret,
+            });
+            const configApi = runtime.config as { writeConfigFile: (cfg: unknown) => Promise<void> };
+            await configApi.writeConfigFile(restoredCfg);
+            // 重新解析 account 以获取恢复后的值
+            account = resolveQQBotAccount(restoredCfg, account.accountId);
+            log?.info(`[umibot:${account.accountId}] 凭证已恢复`);
+          } catch (e) {
+            log?.error(`[umibot:${account.accountId}] 凭证恢复失败: ${e}`);
+          }
+        }
+      }
 
       log?.info(`[umibot:${account.accountId}] Starting gateway — appId=${account.appId}, enabled=${account.enabled}, name=${account.name ?? "unnamed"}`);
       console.log(`[umibot:channel] startAccount: accountId=${account.accountId}, appId=${account.appId}, secretSource=${account.secretSource}`);
@@ -272,6 +369,8 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
         log,
         onReady: () => {
           log?.info(`[umibot:${account.accountId}] Gateway ready`);
+          // 启动成功，保存凭证快照供后续恢复使用
+          saveCredentialBackup(account.accountId, account.appId, account.clientSecret);
           ctx.setStatus({
             ...ctx.getStatus(),
             running: true,
@@ -342,7 +441,7 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       lastOutboundAt: null,
     },
     // 新增：构建通道摘要
-    buildChannelSummary: ({ snapshot }: { snapshot: Record<string, unknown> }) => ({
+    buildChannelSummary: ({ snapshot }) => ({
       configured: snapshot.configured ?? false,
       tokenSource: snapshot.tokenSource ?? "none",
       running: snapshot.running ?? false,
@@ -350,14 +449,14 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       lastConnectedAt: snapshot.lastConnectedAt ?? null,
       lastError: snapshot.lastError ?? null,
     }),
-    buildAccountSnapshot: ({ account, runtime }: { account?: ResolvedQQBotAccount; runtime?: Record<string, unknown> }) => ({
+    buildAccountSnapshot: ({ account, runtime }) => ({
       accountId: account?.accountId ?? DEFAULT_ACCOUNT_ID,
       name: account?.name,
       enabled: account?.enabled ?? false,
       configured: Boolean(account?.appId && account?.clientSecret),
       tokenSource: account?.secretSource,
-      running: runtime?.running ?? false,
-      connected: runtime?.connected ?? false,
+      running: Boolean(runtime?.running ?? false),
+      connected: Boolean(runtime?.connected ?? false),
       lastConnectedAt: runtime?.lastConnectedAt ?? null,
       lastError: runtime?.lastError ?? null,
       lastInboundAt: runtime?.lastInboundAt ?? null,

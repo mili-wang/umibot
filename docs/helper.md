@@ -94,6 +94,8 @@ npm version patch --no-git-tag-version
 
 ```bash
 npm publish
+
+npm publish --ignore-scripts
 ```
 
 - 作用：根据 `package.json` 的 `main`、`files`、`publishConfig` 等，将当前包发布到 npm  registry。
@@ -106,6 +108,8 @@ npm publish
 npm view @mili-wang/umibot
 # 或安装测试
 openclaw plugins install @mili-wang/umibot@latest
+
+openclaw plugins install ./mili-wang-umibot-0.0.2.tgz
 ```
 
 ---

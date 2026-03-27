@@ -1,6 +1,6 @@
 {
   "name": "@mili-wang/umibot",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,34 +12,28 @@
     "bin",
     "src",
     "skills",
+    "scripts",
     "index.ts",
+    "preload.cjs",
     "tsconfig.json",
-    "openclaw.plugin.json",
-    "clawdbot.plugin.json",
-    "moltbot.plugin.json"
+    "openclaw.plugin.json"
   ],
-  "clawdbot": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
-  "moltbot": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
   "openclaw": {
+    "id": "umibot",
     "extensions": [
-      "./index.ts"
-    ]
+      "./preload.cjs"
+    ],
+    "channel": {
+      "id": "umibot",
+      "label": "Umi Bot"
+    }
   },
   "scripts": {
     "build": "tsc || true",
+    "postbuild": "node -e \"const fs=require('fs'),p=require('path'),ext=p.join(require('os').homedir(),'.openclaw/extensions/umibot');if(fs.existsSync(ext)&&!fs.lstatSync(ext).isSymbolicLink()){const d=p.join(ext,'dist'),pr=p.join(ext,'preload.cjs');fs.cpSync('dist',d,{recursive:true});fs.copyFileSync('preload.cjs',pr);console.log('[postbuild] synced to',ext)}\"",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build"
-  },
-  "publishConfig": {
-    "access": "public"
+    "prepack": "npm install --omit=dev",
+    "postinstall": "node scripts/postinstall-link-sdk.js"
   },
   "dependencies": {
     "mpg123-decoder": "^1.0.3",
@@ -52,9 +46,16 @@
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "clawdbot": "*",
-    "moltbot": "*",
     "openclaw": "*"
   },
-  "homepage": "https://github.com/mili-wang/umibot"
+  "homepage": "https://github.com/mili-wang/umibot",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mili-wang/umibot.git"
+  },
+  "bundleDependencies": [
+    "mpg123-decoder",
+    "silk-wasm",
+    "ws"
+  ]
 }

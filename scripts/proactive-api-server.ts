@@ -64,7 +64,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
           clientSecret: envClientSecret,
           enabled: true,
           secretSource: "env",
-          markdownSupport: true,
+          markdownSupport: false,
           config: {},
         };
       }
@@ -82,7 +82,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
           clientSecret: envClientSecret,
           enabled: true,
           secretSource: "env",
-          markdownSupport: true,
+          markdownSupport: false,
           config: {},
         };
       }

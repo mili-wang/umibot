@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * UMIBot CLI - 用于升级和管理 UMIBot 插件
+ * umibot CLI - 用于升级和管理 umibot 插件
  * 
  * 用法:
- *   npx @mili-wang/umibot upgrade    # 升级插件
- *   npx @mili-wang/umibot install    # 安装插件
+ *   npx umibot upgrade    # 升级插件
+ *   npx umibot install    # 安装插件
  */
 
 import { execSync } from 'child_process';
@@ -35,18 +35,22 @@ function detectInstallation() {
   return null;
 }
 
+// 需要清理的所有可能的插件 ID / 包名（原仓库 + 本仓库 + 框架推断名）
+const PLUGIN_IDS = ['umibot', 'openclaw-umi', '@sliverp/umibot', '@tencent-connect/openclaw-umi', '@tencent-connect/umibot', '@tencent-connect/umibot', 'umibot'];
+// 可能的扩展目录名
+const EXTENSION_DIR_NAMES = ['umibot', 'openclaw-umi', 'umibot'];
+
 // 清理旧版本插件，返回旧的 umibot 配置
 function cleanupInstallation(appName) {
   const home = homedir();
   const appDir = join(home, `.${appName}`);
   const configFile = join(appDir, `${appName}.json`);
-  const extensionDir = join(appDir, 'extensions', 'umibot');
 
   let oldQqbotConfig = null;
 
   console.log(`\n>>> 处理 ${appName} 安装...`);
 
-  // 1. 先读取旧的 umibot 配置
+  // 1. 先读取旧的 umibot 配置（尝试所有可能的 channel key）
   if (existsSync(configFile)) {
     try {
       const config = JSON.parse(readFileSync(configFile, 'utf8'));
@@ -59,36 +63,48 @@ function cleanupInstallation(appName) {
     }
   }
 
-  // 2. 删除旧的扩展目录
-  if (existsSync(extensionDir)) {
-    console.log(`删除旧版本插件: ${extensionDir}`);
-    rmSync(extensionDir, { recursive: true, force: true });
-  } else {
-    console.log('未找到旧版本插件目录，跳过删除');
+  // 2. 删除所有可能的旧扩展目录
+  for (const dirName of EXTENSION_DIR_NAMES) {
+    const extensionDir = join(appDir, 'extensions', dirName);
+    if (existsSync(extensionDir)) {
+      console.log(`删除旧版本插件: ${extensionDir}`);
+      rmSync(extensionDir, { recursive: true, force: true });
+    }
   }
 
-  // 3. 清理配置文件中的 umibot 相关字段
+  // 3. 清理配置文件中所有可能的插件 ID 相关字段
   if (existsSync(configFile)) {
-    console.log('清理配置文件中的 umibot 字段...');
+    console.log('清理配置文件中的插件字段...');
     try {
       const config = JSON.parse(readFileSync(configFile, 'utf8'));
 
-      // 删除 channels.umibot
-      if (config.channels?.umibot) {
-        delete config.channels.umibot;
-        console.log('  - 已删除 channels.umibot');
-      }
+      for (const id of PLUGIN_IDS) {
+        // 删除 channels.<id>
+        if (config.channels?.[id]) {
+          delete config.channels[id];
+          console.log(`  - 已删除 channels.${id}`);
+        }
 
-      // 删除 plugins.entries.umibot
-      if (config.plugins?.entries?.umibot) {
-        delete config.plugins.entries.umibot;
-        console.log('  - 已删除 plugins.entries.umibot');
-      }
+        // 删除 plugins.entries.<id>
+        if (config.plugins?.entries?.[id]) {
+          delete config.plugins.entries[id];
+          console.log(`  - 已删除 plugins.entries.${id}`);
+        }
 
-      // 删除 plugins.installs.umibot
-      if (config.plugins?.installs?.umibot) {
-        delete config.plugins.installs.umibot;
-        console.log('  - 已删除 plugins.installs.umibot');
+        // 删除 plugins.installs.<id>
+        if (config.plugins?.installs?.[id]) {
+          delete config.plugins.installs[id];
+          console.log(`  - 已删除 plugins.installs.${id}`);
+        }
+
+        // 删除 plugins.allow 中的 <id>
+        if (Array.isArray(config.plugins?.allow)) {
+          const before = config.plugins.allow.length;
+          config.plugins.allow = config.plugins.allow.filter((x) => x !== id);
+          if (config.plugins.allow.length !== before) {
+            console.log(`  - 已删除 plugins.allow.${id}`);
+          }
+        }
       }
 
       writeFileSync(configFile, JSON.stringify(config, null, 2));
@@ -115,7 +131,7 @@ function runCommand(cmd, args = []) {
 
 // 升级命令
 function upgrade() {
-  console.log('=== UMIBot 插件升级脚本 ===');
+  console.log('=== umibot 插件升级脚本 ===');
 
   let foundInstallation = null;
   let savedConfig = null;
@@ -144,7 +160,7 @@ function upgrade() {
 
   // 自动安装插件
   console.log('\n[1/2] 安装新版本插件...');
-  runCommand(foundInstallation, ['plugins', 'install', '@mili-wang/umibot']);
+  runCommand(foundInstallation, ['plugins', 'install', 'umibot']);
 
   // 自动配置通道（使用保存的 appId 和 clientSecret）
   console.log('\n[2/2] 配置机器人通道...');
@@ -159,7 +175,7 @@ function upgrade() {
     }
   } else {
     console.log('未找到已保存的 umibot 配置，请手动配置:');
-    console.log(`  ${foundInstallation} channels add --channel umibot --token "AppID:AppSecret"`);
+    console.log(`  ${foundInstallation} channels add --channel umibot --token "appid:appsecret"`);
     return;
   }
 
@@ -170,7 +186,7 @@ function upgrade() {
 
 // 安装命令
 function install() {
-  console.log('=== UMIBot 插件安装 ===');
+  console.log('=== umibot 插件安装 ===');
 
   const cmd = detectInstallation();
   if (!cmd) {
@@ -180,28 +196,28 @@ function install() {
   }
 
   console.log(`\n使用 ${cmd} 安装插件...`);
-  runCommand(cmd, ['plugins', 'install', '@mili-wang/umibot']);
+  runCommand(cmd, ['plugins', 'install', '@tencent-connect/umibot']);
 
   console.log('\n=== 安装完成 ===');
   console.log('\n请配置机器人通道:');
-  console.log(`  ${cmd} channels add --channel umibot --token "AppID:AppSecret"`);
+  console.log(`  ${cmd} channels add --channel umibot --token "appid:appsecret"`);
 }
 
 // 显示帮助
 function showHelp() {
   console.log(`
-UMIBot CLI - QQ机器人插件管理工具
+umibot CLI - QQ机器人插件管理工具
 
 用法:
-  npx @mili-wang/umibot <命令>
+  npx umibot <命令>
 
 命令:
   upgrade       清理旧版本插件（升级前执行）
   install       安装插件到 openclaw/clawdbot
 
 示例:
-  npx @mili-wang/umibot upgrade
-  npx @mili-wang/umibot install
+  npx umibot upgrade
+  npx umibot install
 `);
 }
 

@@ -79,10 +79,11 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
         return {
           accountId,
           appId: normalizeAppId(appId),
+          umi6Sn: "",
           clientSecret,
           enabled: true,
           secretSource: "env",
-          markdownSupport: true,
+          markdownSupport: false,
           config: {},
         };
       }
@@ -105,6 +106,7 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
         accountId: "default",
         appId: normalizeAppId(umibot.appId ?? process.env.QQBOT_APP_ID),
         clientSecret: umibot.clientSecret || process.env.QQBOT_CLIENT_SECRET,
+        umi6Sn: umibot.umi6Sn ?? "",
         enabled: umibot.enabled ?? true,
         secretSource: umibot.clientSecret ? "config" : "env",
         markdownSupport: umibot.markdownSupport ?? true,
@@ -116,8 +118,9 @@ function loadAccount(accountId = "default"): ResolvedQQBotAccount | null {
     if (accountConfig) {
       return {
         accountId,
-        appId: normalizeAppId(accountConfig.appId ?? umibot.appId ?? process.env.UMIBOT_APP_ID),
-        clientSecret: accountConfig.clientSecret || umibot.clientSecret || process.env.UMIBOT_CLIENT_SECRET,
+        appId: normalizeAppId(accountConfig.appId ?? umibot.appId ?? process.env.QQBOT_APP_ID),
+        clientSecret: accountConfig.clientSecret || umibot.clientSecret || process.env.QQBOT_CLIENT_SECRET,
+        umi6Sn: accountConfig.umi6Sn ?? umibot.umi6Sn ?? "",
         enabled: accountConfig.enabled ?? true,
         secretSource: accountConfig.clientSecret ? "config" : "env",
         markdownSupport: accountConfig.markdownSupport ?? umibot.markdownSupport ?? true,
@@ -220,10 +223,10 @@ UMIBot 主动消息 CLI 工具
     }
     
     // 加载配置用于广播
-    const configPath = path.join(process.env.HOME || "/home/ubuntu", "clawd", "config.json");
+    const configPath = detectConfigPath();
     let cfg: Record<string, unknown> = {};
     try {
-      if (fs.existsSync(configPath)) {
+      if (configPath && fs.existsSync(configPath)) {
         cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
       }
     } catch {}

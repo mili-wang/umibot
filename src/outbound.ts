@@ -3,6 +3,8 @@
  */
 
 import * as path from "path";
+import * as fs from "fs";
+import * as crypto from "crypto";
 import type { ResolvedQQBotAccount } from "./types.js";
 import { decodeCronPayload } from "./utils/payload.js";
 import {
@@ -12,19 +14,16 @@ import {
   sendGroupMessage,
   sendProactiveC2CMessage,
   sendProactiveGroupMessage,
-  sendC2CImageMessage,
-  sendGroupImageMessage,
-  sendC2CVoiceMessage,
-  sendGroupVoiceMessage,
-  sendC2CVideoMessage,
-  sendGroupVideoMessage,
-  sendC2CFileMessage,
-  sendGroupFileMessage,
+  sendC2CMediaMessage,
+  sendGroupMediaMessage,
+  MediaFileType,
 } from "./api.js";
-import { isAudioFile, audioFileToSilkBase64, waitForFile } from "./utils/audio-convert.js";
-import { normalizeMediaTags } from "./utils/media-tags.js";
-import { checkFileSize, readFileAsync, fileExistsAsync, isLargeFile, formatFileSize } from "./utils/file-utils.js";
-import { isLocalPath as isLocalFilePath, normalizePath, sanitizeFileName } from "./utils/platform.js";
+import { isAudioFile, audioFileToSilkFile, waitForFile, shouldTranscodeVoice } from "./utils/audio-convert.js";
+import { fileExistsAsync, formatFileSize, getMaxUploadSize, getFileTypeName, getFileSizeAsync } from "./utils/file-utils.js";
+import { chunkedUploadC2C, chunkedUploadGroup } from "./utils/chunked-upload.js";
+import { isLocalPath as isLocalFilePath, normalizePath, getQQBotMediaDir } from "./utils/platform.js";
+import { downloadFile } from "./image-server.js";
+import { parseMediaTagsToSendQueue, executeSendQueue, type MediaSendContext } from "./utils/media-send.js";
 
 // ============ 消息回复限流器 ============
 // 同一 message_id 1小时内最多回复 4 次，超过 1 小时无法被动回复（需改为主动消息）
@@ -158,11 +157,15 @@ export interface OutboundContext {
   text: string;
   accountId?: string | null;
   replyToId?: string | null;
+  /** C2C 被动回复时与入站 room_id 一致（lobster Content/create） */
+  roomId?: string | null;
   account: ResolvedQQBotAccount;
 }
 
 export interface MediaOutboundContext extends OutboundContext {
   mediaUrl: string;
+  /** 可选的 MIME 类型，优先于扩展名判断媒体类型 */
+  mimeType?: string;
 }
 
 export interface OutboundResult {
@@ -233,6 +236,451 @@ function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: strin
   return { type: "c2c", id };
 }
 
+// ============ Telegram 风格的结构化媒体发送接口 ============
+// 类似 Telegram 的 sendPhoto / sendVoice / sendVideo / sendDocument，
+// 每种媒体类型一个独立函数，接收结构化参数，无需标签解析。
+// gateway.ts 的 deliver 回调和 sendText 共用这些函数，消除重复代码。
+
+/** 媒体发送的目标上下文（从 deliver 回调或 sendText 中提取） */
+export interface MediaTargetContext {
+  /** 目标类型 */
+  targetType: "c2c" | "group" | "channel";
+  /** 目标 ID */
+  targetId: string;
+  /** UMI Bot 账户配置 */
+  account: ResolvedQQBotAccount;
+  /** 被动回复消息 ID（可选） */
+  replyToId?: string;
+  /** C2C 会话 room_id（lobster 被动回复） */
+  roomId?: string;
+  /** 日志前缀（可选，用于区分调用来源） */
+  logPrefix?: string;
+}
+
+/** 从 OutboundContext 构建 MediaTargetContext */
+function buildMediaTarget(
+  ctx: { to: string; account: ResolvedQQBotAccount; replyToId?: string | null; roomId?: string | null },
+  logPrefix?: string,
+): MediaTargetContext {
+  const target = parseTarget(ctx.to);
+  return {
+    targetType: target.type,
+    targetId: target.id,
+    account: ctx.account,
+    replyToId: ctx.replyToId ?? undefined,
+    roomId: ctx.roomId ?? undefined,
+    logPrefix,
+  };
+}
+
+/** 获取已认证的 access token，失败时抛出异常 */
+async function getToken(account: ResolvedQQBotAccount): Promise<string> {
+  if (!account.appId || !account.clientSecret) {
+    throw new Error("UMIBot not configured (missing appId or clientSecret)");
+  }
+  return getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
+}
+
+/**
+ * sendPhoto — 发送图片消息（对齐 Telegram sendPhoto）
+ * 
+ * 支持三种来源：
+ * - 本地文件路径 → 分片上传
+ * - 公网 HTTP/HTTPS URL → 下载到本地 → 分片上传（失败发文本链接兜底）
+ * - Base64 Data URL → 直传 QQ API
+ */
+export async function sendPhoto(
+  ctx: MediaTargetContext,
+  imagePath: string,
+  /** 原始来源 URL（仅 fallback 路径使用，记录到引用索引） */
+  sourceUrl?: string,
+): Promise<OutboundResult> {
+  const prefix = ctx.logPrefix ?? "[umibot]";
+  const mediaPath = normalizePath(imagePath);
+  const isLocal = isLocalFilePath(mediaPath);
+  const isHttp = mediaPath.startsWith("http://") || mediaPath.startsWith("https://");
+  const isData = mediaPath.startsWith("data:");
+
+  // 公网 URL
+  if (isHttp) {
+    // 频道：仅支持公网 URL（Markdown 格式），无需下载
+    if (ctx.targetType === "channel") {
+      try {
+        const token = await getToken(ctx.account);
+        const r = await sendChannelMessage(token, ctx.targetId, `![](${mediaPath})`, ctx.replyToId);
+        return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`${prefix} sendPhoto: channel Markdown image failed: ${msg}`);
+        return { channel: "umibot", error: msg };
+      }
+    }
+
+    // c2c / group：下载到本地 → 走本地分片上传
+    console.log(`${prefix} sendPhoto: downloading URL to local for chunked upload...`);
+    const dl = await downloadToFallbackDir(mediaPath, prefix, "sendPhoto", ctx.account.appId, ctx.targetId);
+    if (dl.localFile) {
+      return await sendPhoto(ctx, dl.localFile, mediaPath);
+    }
+    return sendFallbackLink(ctx, mediaPath, dl.error ?? "下载失败", prefix, "sendPhoto");
+  }
+
+  if (isLocal) {
+    const ext = path.extname(mediaPath).toLowerCase();
+    const supportedImageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
+    if (!supportedImageExts.includes(ext)) {
+      return { channel: "umibot", error: `Unsupported image format: ${ext}` };
+    }
+
+    // 本地图片统一走分片上传（文件存在/大小校验由 chunkedUploadAndSend 统一处理）
+    console.log(`${prefix} sendPhoto: local image, using chunked upload`);
+    return chunkedUploadAndSend(ctx, mediaPath, MediaFileType.IMAGE, prefix, "sendPhoto",
+      { mediaType: "image", mediaLocalPath: mediaPath, ...(sourceUrl ? { mediaUrl: sourceUrl } : {}) });
+  }
+
+  // Data URL (base64)：解码写到 downloads 目录 → 分块上传
+  if (isData) {
+    try {
+      const match = mediaPath.match(/^data:image\/(\w+);base64,(.+)$/);
+      if (!match) {
+        return { channel: "umibot", error: "无法解析 Data URL 格式" };
+      }
+      const ext = match[1] === "jpeg" ? "jpg" : match[1]!;
+      const base64Data = match[2]!;
+      const buf = Buffer.from(base64Data, "base64");
+
+      const downloadDir = getQQBotMediaDir("downloads", ctx.account.appId, ctx.targetId);
+      fs.mkdirSync(downloadDir, { recursive: true });
+      const tmpName = `dataurl_${crypto.randomBytes(8).toString("hex")}.${ext}`;
+      const localFile = path.join(downloadDir, tmpName);
+      fs.writeFileSync(localFile, buf);
+
+      console.log(`${prefix} sendPhoto: Data URL decoded to ${localFile} (${buf.length} bytes), using chunked upload`);
+      const result = await chunkedUploadAndSend(ctx, localFile, MediaFileType.IMAGE, prefix, "sendPhoto",
+        { mediaType: "image", mediaLocalPath: localFile });
+
+      // 上传完毕后清理文件
+      try { fs.unlinkSync(localFile); } catch { /* ignore */ }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${prefix} sendPhoto Data URL failed: ${msg}`);
+      return { channel: "umibot", error: msg };
+    }
+  }
+
+  return { channel: "umibot", error: `不支持的图片来源: ${mediaPath.slice(0, 50)}` };
+}
+
+/**
+ * sendVoice — 发送语音消息（对齐 Telegram sendVoice）
+ * 
+ * 支持本地音频文件和公网 URL：
+ * - urlDirectUpload=true + 公网URL：先直传平台，失败后下载到本地再转码重试
+ * - urlDirectUpload=false + 公网URL：直接下载到本地再转码发送
+ * - 本地文件：自动转换为 SILK 格式后上传
+ * 
+ * 支持 transcodeEnabled 配置：禁用时非原生格式 fallback 到文件发送。
+ */
+export async function sendVoice(
+  ctx: MediaTargetContext,
+  voicePath: string,
+  /** 直传格式列表（跳过 SILK 转换），可选 */
+  directUploadFormats?: string[],
+  /** 是否启用转码（默认 true），false 时非原生格式直接返回错误 */
+  transcodeEnabled: boolean = true,
+): Promise<OutboundResult> {
+  const prefix = ctx.logPrefix ?? "[umibot]";
+  const mediaPath = normalizePath(voicePath);
+  const isHttp = mediaPath.startsWith("http://") || mediaPath.startsWith("https://");
+
+  // 公网 URL：统一下载到本地 → 分块上传（不走平台拉取）
+  if (isHttp) {
+    console.log(`${prefix} sendVoice: downloading URL to local for chunked upload...`);
+    const dl = await downloadToFallbackDir(mediaPath, prefix, "sendVoice", ctx.account.appId, ctx.targetId);
+    if (dl.localFile) {
+      return await sendVoiceFromLocal(ctx, dl.localFile, directUploadFormats, transcodeEnabled, prefix, mediaPath);
+    }
+    return sendFallbackLink(ctx, mediaPath, dl.error ?? "下载失败", prefix, "sendVoice");
+  }
+
+  // 本地文件
+  return await sendVoiceFromLocal(ctx, mediaPath, directUploadFormats, transcodeEnabled, prefix);
+}
+
+/** 从本地文件发送语音（sendVoice 的内部辅助） */
+async function sendVoiceFromLocal(
+  ctx: MediaTargetContext,
+  mediaPath: string,
+  directUploadFormats: string[] | undefined,
+  transcodeEnabled: boolean,
+  prefix: string,
+  sourceUrl?: string,
+): Promise<OutboundResult> {
+  // 等待文件就绪（TTS 异步生成，文件可能还没写完）
+  const fileSize = await waitForFile(mediaPath);
+  if (fileSize === 0) {
+    return { channel: "umibot", error: "Voice generate failed" };
+  }
+
+  // 精细检测：是否需要转码
+  const needsTranscode = shouldTranscodeVoice(mediaPath);
+
+  // 转码已禁用但需要转码 → 提前 fallback
+  if (needsTranscode && !transcodeEnabled) {
+    const ext = path.extname(mediaPath).toLowerCase();
+    console.log(`${prefix} sendVoice: transcode disabled, format ${ext} needs transcode, returning error for fallback`);
+    return { channel: "umibot", error: `语音转码已禁用，格式 ${ext} 不支持直传` };
+  }
+
+  const urlMeta = sourceUrl ? { mediaUrl: sourceUrl } : {};
+
+  // 统一走分片上传：需要转码的先转码写入临时文件，不需要转码的直接上传原文件
+  try {
+    const uploadPath = needsTranscode
+      ? await audioFileToSilkFile(mediaPath, directUploadFormats)
+      : mediaPath;
+
+    if (!uploadPath) {
+      // 转码失败 → fallback: 读取原文件直接上传
+      console.warn(`${prefix} sendVoice: SILK conversion failed, uploading raw file via chunked upload`);
+      return chunkedUploadAndSend(ctx, mediaPath, MediaFileType.VOICE, prefix, "sendVoice",
+        { mediaType: "voice", mediaLocalPath: mediaPath, ...urlMeta });
+    }
+
+    const uploadSize = await getFileSizeAsync(uploadPath);
+    console.log(`${prefix} sendVoice: using chunked upload (${formatFileSize(uploadSize)})${needsTranscode ? " [transcoded]" : ""}`);
+    return chunkedUploadAndSend(ctx, uploadPath, MediaFileType.VOICE, prefix, "sendVoice",
+      { mediaType: "voice", mediaLocalPath: mediaPath, ...urlMeta });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${prefix} sendVoice (local) failed: ${msg}`);
+    return { channel: "umibot", error: msg };
+  }
+}
+
+/**
+ * sendVideoMsg — 发送视频消息（对齐 Telegram sendVideo）
+ * 
+ * 支持公网 URL（urlDirectUpload 控制直传或下载，失败自动 fallback）和本地文件路径。
+ */
+export async function sendVideoMsg(
+  ctx: MediaTargetContext,
+  videoPath: string,
+): Promise<OutboundResult> {
+  const prefix = ctx.logPrefix ?? "[umibot]";
+  const mediaPath = normalizePath(videoPath);
+  const isHttp = mediaPath.startsWith("http://") || mediaPath.startsWith("https://");
+
+  // 公网 URL：统一下载到本地 → 分块上传（不走平台拉取）
+  if (isHttp) {
+    console.log(`${prefix} sendVideoMsg: downloading URL to local for chunked upload...`);
+    const dl = await downloadToFallbackDir(mediaPath, prefix, "sendVideoMsg", ctx.account.appId, ctx.targetId);
+    if (dl.localFile) {
+      return await sendVideoFromLocal(ctx, dl.localFile, prefix, mediaPath);
+    }
+    return sendFallbackLink(ctx, mediaPath, dl.error ?? "下载失败", prefix, "sendVideoMsg");
+  }
+
+  // 本地文件
+  return await sendVideoFromLocal(ctx, mediaPath, prefix);
+}
+
+/**
+ * 通用分片上传并发送 — 消除 Video/Document/Image/Voice 的重复代码
+ * 
+ * 根据 ctx.targetType 自动选择 C2C / Group 分片上传，上传完成后发送媒体消息。
+ * Channel 类型不支持分片上传，返回错误。
+ */
+async function chunkedUploadAndSend(
+  ctx: MediaTargetContext,
+  mediaPath: string,
+  fileType: MediaFileType,
+  prefix: string,
+  /** 调用方名称，用于日志，如 "sendVideoMsg" / "sendDocument" */
+  callerName: string,
+  /** 发送消息时的额外 meta 信息（可选） */
+  sendMeta?: Record<string, unknown>,
+): Promise<OutboundResult> {
+  const { appId, clientSecret } = ctx.account;
+  if (!appId || !clientSecret) {
+    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
+  }
+
+  // 统一前置校验：文件存在 + 非空 + 大小上限
+  if (!(await fileExistsAsync(mediaPath))) {
+    return { channel: "umibot", error: `${callerName}: file not found: ${mediaPath}` };
+  }
+  const fileSize = await getFileSizeAsync(mediaPath);
+  if (fileSize === 0) {
+    return { channel: "umibot", error: `${callerName}: file is empty: ${mediaPath}` };
+  }
+  const maxSize = getMaxUploadSize(fileType);
+  if (fileSize > maxSize) {
+    const typeName = getFileTypeName(fileType);
+    const limitMB = Math.round(maxSize / (1024 * 1024));
+    return { channel: "umibot", error: `${typeName}过大（${formatFileSize(fileSize)}），超过了${limitMB}M，暂时不能通过QQ直接发给你。` };
+  }
+
+  if (ctx.targetType === "c2c") {
+    console.log(`${prefix} ${callerName}: c2c chunked upload (${formatFileSize(fileSize)})`);
+    try {
+      const uploadResult = await chunkedUploadC2C(
+        appId, clientSecret, ctx.account.umi6Sn, ctx.targetId, mediaPath, fileType,
+        {
+          logPrefix: `${prefix} [chunked]`,
+          onProgress: (progress) => {
+            console.log(`${prefix} ${callerName}: chunked upload progress ${progress.completedParts}/${progress.totalParts} parts, ${formatFileSize(progress.uploadedBytes)}/${formatFileSize(progress.totalBytes)}`);
+          },
+        },
+      );
+
+      const token = await getToken(ctx.account);
+      const r = await sendC2CMediaMessage(token, ctx.targetId, uploadResult.file_info, ctx.replyToId, undefined, sendMeta);
+      return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${prefix} ${callerName}: c2c chunked upload failed: ${msg}`);
+      return { channel: "umibot", error: `文件发送失败，请稍后重试。` };
+    }
+  }
+
+  if (ctx.targetType === "group") {
+    console.log(`${prefix} ${callerName}: group chunked upload (${formatFileSize(fileSize)})`);
+    try {
+      const uploadResult = await chunkedUploadGroup(
+        appId, clientSecret, ctx.account.umi6Sn, ctx.targetId, mediaPath, fileType,
+        {
+          logPrefix: `${prefix} [chunked]`,
+          onProgress: (progress) => {
+            console.log(`${prefix} ${callerName}: chunked upload progress ${progress.completedParts}/${progress.totalParts} parts, ${formatFileSize(progress.uploadedBytes)}/${formatFileSize(progress.totalBytes)}`);
+          },
+        },
+      );
+
+      const token = await getToken(ctx.account);
+      const r = await sendGroupMediaMessage(token, ctx.targetId, uploadResult.file_info, ctx.replyToId);
+      return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${prefix} ${callerName}: group chunked upload failed: ${msg}`);
+      return { channel: "umibot", error: `文件发送失败，请稍后重试。` };
+    }
+  }
+
+  // Channel: 不支持分片上传
+  console.log(`${prefix} ${callerName}: media not supported in channel`);
+  return { channel: "umibot", error: `${callerName}: media not supported in channel` };
+}
+
+/** 从本地文件发送视频（sendVideoMsg 的内部辅助） */
+async function sendVideoFromLocal(ctx: MediaTargetContext, mediaPath: string, prefix: string, sourceUrl?: string): Promise<OutboundResult> {
+  // 文件存在/大小校验由 chunkedUploadAndSend 统一处理
+  return chunkedUploadAndSend(ctx, mediaPath, MediaFileType.VIDEO, prefix, "sendVideoMsg",
+    { mediaType: "video", mediaLocalPath: mediaPath, ...(sourceUrl ? { mediaUrl: sourceUrl } : {}) });
+}
+
+/**
+ * sendDocument — 发送文件消息（对齐 Telegram sendDocument）
+ * 
+ * 支持本地文件路径和公网 URL（urlDirectUpload 控制直传或下载，失败自动 fallback）。
+ */
+export async function sendDocument(
+  ctx: MediaTargetContext,
+  filePath: string,
+): Promise<OutboundResult> {
+  const prefix = ctx.logPrefix ?? "[umibot]";
+  const mediaPath = normalizePath(filePath);
+  const isHttp = mediaPath.startsWith("http://") || mediaPath.startsWith("https://");
+
+  // 公网 URL：统一下载到本地 → 分块上传（不走平台拉取）
+  if (isHttp) {
+    console.log(`${prefix} sendDocument: downloading URL to local for chunked upload...`);
+    const dl = await downloadToFallbackDir(mediaPath, prefix, "sendDocument", ctx.account.appId, ctx.targetId);
+    if (dl.localFile) {
+      return await sendDocumentFromLocal(ctx, dl.localFile, prefix, mediaPath);
+    }
+    return sendFallbackLink(ctx, mediaPath, dl.error ?? "下载失败", prefix, "sendDocument");
+  }
+
+  // 本地文件
+  return await sendDocumentFromLocal(ctx, mediaPath, prefix);
+}
+
+/** 从本地文件发送文件（sendDocument 的内部辅助） */
+async function sendDocumentFromLocal(ctx: MediaTargetContext, mediaPath: string, prefix: string, sourceUrl?: string): Promise<OutboundResult> {
+  // 文件存在/空文件/大小校验由 chunkedUploadAndSend 统一处理
+  return chunkedUploadAndSend(ctx, mediaPath, MediaFileType.FILE, prefix, "sendDocument",
+    { mediaType: "file", mediaLocalPath: mediaPath, ...(sourceUrl ? { mediaUrl: sourceUrl } : {}) });
+}
+
+/** 下载 fallback 的结果 */
+interface DownloadFallbackResult {
+  /** 下载成功时的本地文件路径 */
+  localFile: string | null;
+  /** 下载失败时的错误信息 */
+  error?: string;
+}
+
+/**
+ * 通用辅助：下载远程文件到 fallback 目录
+ * 目录结构：~/.openclaw/media/umibot/downloads/{appId}/{targetId}/
+ * 用于各 send* 函数的公网 URL 下载
+ */
+async function downloadToFallbackDir(httpUrl: string, prefix: string, caller: string, appId?: string, targetId?: string): Promise<DownloadFallbackResult> {
+  try {
+    const subPaths = ["downloads", ...(appId ? [appId] : []), ...(targetId ? [targetId] : [])];
+    const downloadDir = getQQBotMediaDir(...subPaths);
+    const result = await downloadFile(httpUrl, undefined, { destDir: downloadDir });
+    if (!result.filePath) {
+      const errorMsg = result.error ?? "下载失败";
+      console.error(`${prefix} ${caller} fallback: download failed for ${httpUrl.slice(0, 80)} — ${errorMsg}`);
+      return { localFile: null, error: errorMsg };
+    }
+    console.log(`${prefix} ${caller} fallback: downloaded → ${result.filePath}`);
+    return { localFile: result.filePath };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${prefix} ${caller} fallback download error:`, err);
+    return { localFile: null, error: msg };
+  }
+}
+
+/**
+ * 媒体下载/上传失败时的兜底：把原始 URL 以文本链接的形式发给用户。
+ * 用户可以手动点击链接在浏览器中打开。
+ */
+async function sendFallbackLink(
+  ctx: MediaTargetContext,
+  httpUrl: string,
+  errorReason: string,
+  prefix: string,
+  caller: string,
+): Promise<OutboundResult> {
+  console.warn(`${prefix} ${caller}: falling back to text link for "${httpUrl.slice(0, 80)}"`);
+  try {
+    const token = await getToken(ctx.account);
+    const fallbackText = `📎 ${httpUrl}`;
+
+    let r: { id?: string; timestamp?: string | number };
+    if (ctx.targetType === "c2c") {
+      r = await sendC2CMessage(token, ctx.targetId, fallbackText, ctx.account.umi6Sn, ctx.replyToId, ctx.roomId);
+    } else if (ctx.targetType === "group") {
+      r = await sendGroupMessage(token, ctx.targetId, fallbackText, ctx.replyToId);
+    } else {
+      r = await sendChannelMessage(token, ctx.targetId, fallbackText, ctx.replyToId);
+    }
+    // 链接已成功发给用户 → 视为兜底成功，不设 error，
+    // 上层不会再发额外的错误文案
+    console.log(`${prefix} ${caller}: fallback link sent successfully`);
+    return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
+  } catch (fallbackErr) {
+    const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+    console.error(`${prefix} ${caller}: fallback link send also failed: ${fallbackMsg}`);
+    return { channel: "umibot", error: `${caller}: 媒体发送失败 (${errorReason})，兜底链接也发送失败 (${fallbackMsg})` };
+  }
+}
+
 /**
  * 发送文本消息
  * - 有 replyToId: 被动回复，1小时内最多回复4次
@@ -241,10 +689,10 @@ function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: strin
  * 注意：
  * 1. 主动消息（无 replyToId）必须有消息内容，不支持流式发送
  * 2. 当被动回复不可用（超期或超过次数）时，自动降级为主动消息
- * 3. 支持 <qqimg>路径</qqimg> 或 <qqimg>路径</img> 格式发送图片
+ * 3. 支持 <umiimg>路径</umiimg> 或 <umiimg>路径</img> 格式发送图片
  */
 export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
-  const { to, account } = ctx;
+  const { to, account, roomId } = ctx;
   let { text, replyToId } = ctx;
   let fallbackToProactive = false;
 
@@ -265,7 +713,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
         // 不应该发生，但作为保底
         console.error(`[umibot] sendText: 消息回复被限流但未设置降级 - ${limitCheck.message}`);
         return { 
-          channel: "umibot", 
+          channel: "umibot",
           error: limitCheck.message 
         };
       }
@@ -275,366 +723,72 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
   }
 
   // ============ 媒体标签检测与处理 ============
-  // 支持四种标签:
-  //   <qqimg>路径</qqimg> 或 <qqimg>路径</img>  — 图片
-  //   <qqvoice>路径</qqvoice>                   — 语音
-  //   <qqvideo>路径或URL</qqvideo>                — 视频
-  //   <qqfile>路径</qqfile>                     — 文件
+  // 支持五种标签:
+  //   <umiimg>路径</umiimg>      — 图片
+  //   <umivoice>路径</umivoice>  — 语音
+  //   <umivideo>路径或URL</umivideo> — 视频
+  //   <umifile>路径</umifile>    — 文件
+  //   <umimedia>路径或URL</umimedia> — 自动识别（根据扩展名路由）
+  // 使用 deliver-common.ts 的公共解析器，消除与 gateway.ts 的重复
   
-  // 预处理：纠正小模型常见的标签拼写错误和格式问题
-  text = normalizeMediaTags(text);
+  const { hasMediaTags: hasMedia, sendQueue } = parseMediaTagsToSendQueue(text);
   
-  const mediaTagRegex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
-  const mediaTagMatches = text.match(mediaTagRegex);
-  
-  if (mediaTagMatches && mediaTagMatches.length > 0) {
-    console.log(`[umibot] sendText: Detected ${mediaTagMatches.length} media tag(s), processing...`);
-    
-    // 构建发送队列：根据内容在原文中的实际位置顺序发送
-    const sendQueue: Array<{ type: "text" | "image" | "voice" | "video" | "file"; content: string }> = [];
-    
-    let lastIndex = 0;
-    const mediaTagRegexWithIndex = /<(qqimg|qqvoice|qqvideo|qqfile)>([^<>]+)<\/(?:qqimg|qqvoice|qqvideo|qqfile|img)>/gi;
-    let match;
-    
-    while ((match = mediaTagRegexWithIndex.exec(text)) !== null) {
-      // 添加标签前的文本
-      const textBefore = text.slice(lastIndex, match.index).replace(/\n{3,}/g, "\n\n").trim();
-      if (textBefore) {
-        sendQueue.push({ type: "text", content: textBefore });
-      }
-      
-      const tagName = match[1]!.toLowerCase(); // "qqimg" or "qqvoice" or "qqfile"
-      
-      // 剥离 MEDIA: 前缀（框架可能注入），展开 ~ 路径
-      let mediaPath = match[2]?.trim() ?? "";
-      if (mediaPath.startsWith("MEDIA:")) {
-        mediaPath = mediaPath.slice("MEDIA:".length);
-      }
-      mediaPath = normalizePath(mediaPath);
-
-      // 处理可能被模型转义的路径
-      // 1. 双反斜杠 -> 单反斜杠（Markdown 转义）
-      mediaPath = mediaPath.replace(/\\\\/g, "\\");
-
-      // 2. 八进制转义序列 + UTF-8 双重编码修复
-      try {
-        const hasOctal = /\\[0-7]{1,3}/.test(mediaPath);
-        const hasNonASCII = /[\u0080-\u00FF]/.test(mediaPath);
-
-        if (hasOctal || hasNonASCII) {
-          console.log(`[umibot] sendText: Decoding path with mixed encoding: ${mediaPath}`);
-
-          // Step 1: 将八进制转义转换为字节
-          let decoded = mediaPath.replace(/\\([0-7]{1,3})/g, (_: string, octal: string) => {
-            return String.fromCharCode(parseInt(octal, 8));
-          });
-
-          // Step 2: 提取所有字节（包括 Latin-1 字符）
-          const bytes: number[] = [];
-          for (let i = 0; i < decoded.length; i++) {
-            const code = decoded.charCodeAt(i);
-            if (code <= 0xFF) {
-              bytes.push(code);
-            } else {
-              const charBytes = Buffer.from(decoded[i], 'utf8');
-              bytes.push(...charBytes);
-            }
-          }
-
-          // Step 3: 尝试按 UTF-8 解码
-          const buffer = Buffer.from(bytes);
-          const utf8Decoded = buffer.toString('utf8');
-
-          if (!utf8Decoded.includes('\uFFFD') || utf8Decoded.length < decoded.length) {
-            mediaPath = utf8Decoded;
-            console.log(`[umibot] sendText: Successfully decoded path: ${mediaPath}`);
-          }
-        }
-      } catch (decodeErr) {
-        console.error(`[umibot] sendText: Path decode error: ${decodeErr}`);
-      }
-
-      if (mediaPath) {
-        if (tagName === "qqvoice") {
-          sendQueue.push({ type: "voice", content: mediaPath });
-          console.log(`[umibot] sendText: Found voice path in <qqvoice>: ${mediaPath}`);
-        } else if (tagName === "qqvideo") {
-          sendQueue.push({ type: "video", content: mediaPath });
-          console.log(`[umibot] sendText: Found video URL in <qqvideo>: ${mediaPath}`);
-        } else if (tagName === "qqfile") {
-          sendQueue.push({ type: "file", content: mediaPath });
-          console.log(`[umibot] sendText: Found file path in <qqfile>: ${mediaPath}`);
-        } else {
-          sendQueue.push({ type: "image", content: mediaPath });
-          console.log(`[umibot] sendText: Found image path in <qqimg>: ${mediaPath}`);
-        }
-      }
-      
-      lastIndex = match.index + match[0].length;
-    }
-    
-    // 添加最后一个标签后的文本
-    const textAfter = text.slice(lastIndex).replace(/\n{3,}/g, "\n\n").trim();
-    if (textAfter) {
-      sendQueue.push({ type: "text", content: textAfter });
-    }
-    
+  if (hasMedia && sendQueue.length > 0) {
     console.log(`[umibot] sendText: Send queue: ${sendQueue.map(item => item.type).join(" -> ")}`);
     
-    // 按顺序发送
-    if (!account.appId || !account.clientSecret) {
-      return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
-    }
+    // 构建统一的媒体发送上下文
+    const mediaTarget = buildMediaTarget({ to, account, replyToId, roomId }, "[umibot:sendText]");
+    const mediaSendCtx: MediaSendContext = {
+      mediaTarget,
+      qualifiedTarget: to,
+      account,
+      replyToId: replyToId ?? undefined,
+      log: {
+        info: (msg: string) => console.log(msg),
+        error: (msg: string) => console.error(msg),
+        debug: (msg: string) => console.log(msg),
+      },
+    };
     
-    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
-    const target = parseTarget(to);
     let lastResult: OutboundResult = { channel: "umibot" };
     
-    for (const item of sendQueue) {
-      try {
-        if (item.type === "text") {
-          // 发送文本
-          if (replyToId) {
-            // 被动回复
-            if (target.type === "c2c") {
-              const result = await sendC2CMessage(accessToken, target.id, item.content, account.umi6Sn, replyToId);
-              recordMessageReply(replyToId);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
-            } else if (target.type === "group") {
-              const result = await sendGroupMessage(accessToken, target.id, item.content, replyToId);
-              recordMessageReply(replyToId);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, item.content, replyToId);
-              recordMessageReply(replyToId);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
-            }
-          } else {
-            // 主动消息
-            if (target.type === "c2c") {
-              const result = await sendProactiveC2CMessage(accessToken, target.id, item.content);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
-            } else if (target.type === "group") {
-              const result = await sendProactiveGroupMessage(accessToken, target.id, item.content);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, item.content);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
-            }
-          }
-          console.log(`[umibot] sendText: Sent text part: ${item.content.slice(0, 30)}...`);
-        } else if (item.type === "image") {
-          // 发送图片
-          const imagePath = item.content;
-          const isHttpUrl = imagePath.startsWith("http://") || imagePath.startsWith("https://");
-          
-          let imageUrl = imagePath;
-          
-          // 如果是本地文件路径，读取并转换为 Base64
-          if (!isHttpUrl && !imagePath.startsWith("data:")) {
-            if (!(await fileExistsAsync(imagePath))) {
-              console.error(`[umibot] sendText: Image file not found: ${imagePath}`);
-              continue;
-            }
-            // 文件大小校验
-            const sizeCheck = checkFileSize(imagePath);
-            if (!sizeCheck.ok) {
-              console.error(`[umibot] sendText: ${sizeCheck.error}`);
-              continue;
-            }
-            const fileBuffer = await readFileAsync(imagePath);
-            const ext = path.extname(imagePath).toLowerCase();
-            const mimeTypes: Record<string, string> = {
-              ".jpg": "image/jpeg",
-              ".jpeg": "image/jpeg",
-              ".png": "image/png",
-              ".gif": "image/gif",
-              ".webp": "image/webp",
-              ".bmp": "image/bmp",
-            };
-            const mimeType = mimeTypes[ext] ?? "image/png";
-            imageUrl = `data:${mimeType};base64,${fileBuffer.toString("base64")}`;
-            console.log(`[umibot] sendText: Converted local image to Base64 (size: ${formatFileSize(fileBuffer.length)})`);
-          }
-          
-          // 发送图片
+    // 使用统一的发送队列执行器
+    await executeSendQueue(sendQueue, mediaSendCtx, {
+      onSendText: async (textContent) => {
+        // sendText 场景的文本发送：需要区分主动/被动消息
+        if (replyToId) {
+          const accessToken = await getToken(account);
+          const target = parseTarget(to);
           if (target.type === "c2c") {
-            const result = await sendC2CImageMessage(accessToken, target.id, imageUrl, replyToId ?? undefined, undefined, isHttpUrl ? undefined : imagePath);
-            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
+            const result = await sendC2CMessage(accessToken, target.id, textContent, account.umi6Sn, replyToId, roomId ?? undefined);
+            recordMessageReply(replyToId);
+            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
           } else if (target.type === "group") {
-            const result = await sendGroupImageMessage(accessToken, target.id, imageUrl, replyToId ?? undefined);
-            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-          } else if (isHttpUrl) {
-            // 频道使用 Markdown 格式（仅支持公网 URL）
-            const result = await sendChannelMessage(accessToken, target.id, `![](${imagePath})`, replyToId ?? undefined);
-            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
+            const result = await sendGroupMessage(accessToken, target.id, textContent, replyToId);
+            recordMessageReply(replyToId);
+            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
+          } else {
+            const result = await sendChannelMessage(accessToken, target.id, textContent, replyToId);
+            recordMessageReply(replyToId);
+            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
           }
-          console.log(`[umibot] sendText: Sent image via <qqimg> tag: ${imagePath.slice(0, 60)}...`);
-        } else if (item.type === "voice") {
-          // 发送语音文件
-          const voicePath = item.content;
-
-          // 等待文件就绪（TTS 工具异步生成，文件可能还没写完）
-          const fileSize = await waitForFile(voicePath);
-          if (fileSize === 0) {
-            console.error(`[umibot] sendText: Voice file not ready after waiting: ${voicePath}`);
-            // 发送友好提示给用户
-            try {
-              if (target.type === "c2c") {
-                await sendC2CMessage(accessToken, target.id, "语音生成失败，请稍后重试", account.umi6Sn, replyToId ?? undefined);
-              } else if (target.type === "group") {
-                await sendGroupMessage(accessToken, target.id, "语音生成失败，请稍后重试", replyToId ?? undefined);
-              }
-            } catch {}
-            continue;
-          }
-
-          // 转换为 SILK 格式（QQ Bot API 语音只支持 SILK）
-          const silkBase64 = await audioFileToSilkBase64(voicePath);
-          if (!silkBase64) {
-            const ext = path.extname(voicePath).toLowerCase();
-            console.error(`[umibot] sendText: Voice conversion to SILK failed: ${ext} (${fileSize} bytes)`);
-            try {
-              if (target.type === "c2c") {
-                await sendC2CMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", account.umi6Sn, replyToId ?? undefined);
-              } else if (target.type === "group") {
-                await sendGroupMessage(accessToken, target.id, "语音格式转换失败，请稍后重试", replyToId ?? undefined);
-              }
-            } catch {}
-            continue;
-          }
-          console.log(`[umibot] sendText: Voice converted to SILK (${fileSize} bytes)`);
-
+        } else {
+          const accessToken = await getToken(account);
+          const target = parseTarget(to);
           if (target.type === "c2c") {
-            const result = await sendC2CVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
+            const result = await sendProactiveC2CMessage(accessToken, target.id, textContent);
+            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
           } else if (target.type === "group") {
-            const result = await sendGroupVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
+            const result = await sendProactiveGroupMessage(accessToken, target.id, textContent);
+            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
           } else {
-            const result = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
-            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
+            const result = await sendChannelMessage(accessToken, target.id, textContent);
+            lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: (result as any).ext_info?.ref_idx };
           }
-          console.log(`[umibot] sendText: Sent voice via <qqvoice> tag: ${voicePath.slice(0, 60)}...`);
-        } else if (item.type === "video") {
-          // 发送视频（支持公网 URL 和本地文件）
-          const videoPath = item.content;
-          const isHttpUrl = videoPath.startsWith("http://") || videoPath.startsWith("https://");
-
-          if (isHttpUrl) {
-            // 公网 URL
-            if (target.type === "c2c") {
-              const result = await sendC2CVideoMessage(accessToken, target.id, videoPath, undefined, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupVideoMessage(accessToken, target.id, videoPath, undefined, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            }
-          } else {
-            // 本地文件：读取为 Base64
-            if (!(await fileExistsAsync(videoPath))) {
-              console.error(`[umibot] sendText: Video file not found: ${videoPath}`);
-              continue;
-            }
-            const videoSizeCheck = checkFileSize(videoPath);
-            if (!videoSizeCheck.ok) {
-              console.error(`[umibot] sendText: ${videoSizeCheck.error}`);
-              continue;
-            }
-            // 大文件进度提示
-            if (isLargeFile(videoSizeCheck.size)) {
-              try {
-                const hint = `⏳ 正在上传视频 (${formatFileSize(videoSizeCheck.size)})...`;
-                if (target.type === "c2c") {
-                  await sendC2CMessage(accessToken, target.id, hint, account.umi6Sn, replyToId ?? undefined);
-                } else if (target.type === "group") {
-                  await sendGroupMessage(accessToken, target.id, hint, replyToId ?? undefined);
-                }
-              } catch {}
-            }
-            const fileBuffer = await readFileAsync(videoPath);
-            const videoBase64 = fileBuffer.toString("base64");
-            console.log(`[umibot] sendText: Read local video (${formatFileSize(fileBuffer.length)}): ${videoPath}`);
-
-            if (target.type === "c2c") {
-              const result = await sendC2CVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined, undefined, videoPath);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            }
-          }
-          console.log(`[umibot] sendText: Sent video via <qqvideo> tag: ${videoPath.slice(0, 60)}...`);
-        } else if (item.type === "file") {
-          // 发送文件
-          const filePath = item.content;
-          const isHttpUrl = filePath.startsWith("http://") || filePath.startsWith("https://");
-          const fileName = sanitizeFileName(path.basename(filePath));
-
-          if (isHttpUrl) {
-            // 公网 URL：直接通过 url 参数上传
-            if (target.type === "c2c") {
-              const result = await sendC2CFileMessage(accessToken, target.id, undefined, filePath, replyToId ?? undefined, fileName);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupFileMessage(accessToken, target.id, undefined, filePath, replyToId ?? undefined, fileName);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            }
-          } else {
-            // 本地文件：读取转 Base64 上传
-            if (!(await fileExistsAsync(filePath))) {
-              console.error(`[umibot] sendText: File not found: ${filePath}`);
-              continue;
-            }
-            const fileSizeCheck = checkFileSize(filePath);
-            if (!fileSizeCheck.ok) {
-              console.error(`[umibot] sendText: ${fileSizeCheck.error}`);
-              continue;
-            }
-            // 大文件进度提示
-            if (isLargeFile(fileSizeCheck.size)) {
-              try {
-                const hint = `⏳ 正在上传文件 ${fileName} (${formatFileSize(fileSizeCheck.size)})...`;
-                if (target.type === "c2c") {
-                  await sendC2CMessage(accessToken, target.id, hint, account.umi6Sn, replyToId ?? undefined);
-                } else if (target.type === "group") {
-                  await sendGroupMessage(accessToken, target.id, hint, replyToId ?? undefined);
-                }
-              } catch {}
-            }
-            const fileBuffer = await readFileAsync(filePath);
-            const fileBase64 = fileBuffer.toString("base64");
-            console.log(`[umibot] sendText: Read local file (${formatFileSize(fileBuffer.length)}): ${filePath}`);
-
-            if (target.type === "c2c") {
-              const result = await sendC2CFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName, filePath);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else if (target.type === "group") {
-              const result = await sendGroupFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            } else {
-              const result = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-              lastResult = { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-            }
-          }
-          console.log(`[umibot] sendText: Sent file via <qqfile> tag: ${filePath.slice(0, 60)}...`);
         }
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        console.error(`[umibot] sendText: Failed to send ${item.type}: ${errMsg}`);
-        // 继续发送队列中的其他内容
-      }
-    }
+        console.log(`[umibot] sendText: Sent text part: ${textContent.slice(0, 30)}...`);
+      },
+    });
     
     return lastResult;
   }
@@ -684,7 +838,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
 
     // 有 replyToId，使用被动回复接口
     if (target.type === "c2c") {
-      const result = await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId);
+      const result = await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId, roomId ?? undefined);
       // 记录回复次数
       recordMessageReply(replyToId);
       return { channel: "umibot", messageId: result.id, timestamp: result.timestamp, refIdx: result.ext_info?.ref_idx };
@@ -804,428 +958,94 @@ export async function sendProactiveMessage(
  * ```
  */
 export async function sendMedia(ctx: MediaOutboundContext): Promise<OutboundResult> {
-  const { to, text, replyToId, account } = ctx;
-  // 展开波浪线路径：~/Desktop/file.png → /Users/xxx/Desktop/file.png
+  const { to, text, replyToId, roomId, account, mimeType } = ctx;
   const mediaUrl = normalizePath(ctx.mediaUrl);
 
   if (!account.appId || !account.clientSecret) {
     return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
   }
-
   if (!mediaUrl) {
     return { channel: "umibot", error: "mediaUrl is required for sendMedia" };
   }
 
-  // 判断是否为语音文件（本地文件路径 + 音频扩展名）
-  const isLocalPath = isLocalFilePath(mediaUrl);
-  const isHttpUrl = mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://");
+  const target = buildMediaTarget({ to, account, replyToId, roomId }, "[umibot:sendMedia]");
 
-  if (isLocalPath && isAudioFile(mediaUrl)) {
-    return sendVoiceFile(ctx);
-  }
-
-  // 判断是否为视频（公网 URL 或本地视频文件）
-  if (isVideoFile(mediaUrl)) {
-    if (isHttpUrl) {
-      return sendVideoUrl(ctx);
+  // 按类型分发（MIME 优先，扩展名回退）
+  // 各 send* 函数内部已自带 URL 直传/下载策略（受 urlDirectUpload 开关控制）
+  if (isAudioFile(mediaUrl, mimeType)) {
+    const formats = account.config?.audioFormatPolicy?.uploadDirectFormats ?? account.config?.voiceDirectUploadFormats;
+    const transcodeEnabled = account.config?.audioFormatPolicy?.transcodeEnabled !== false;
+    const result = await sendVoice(target, mediaUrl, formats, transcodeEnabled);
+    if (!result.error) {
+      if (text?.trim()) await sendTextAfterMedia(target, text);
+      return result;
     }
-    if (isLocalPath) {
-      return sendVideoFile(ctx);
+    // 语音发送失败 fallback 到文件发送（保留错误链）
+    const voiceError = result.error;
+    console.warn(`[umibot] sendMedia: sendVoice failed (${voiceError}), falling back to sendDocument`);
+    const fallback = await sendDocument(target, mediaUrl);
+    if (!fallback.error) {
+      if (text?.trim()) await sendTextAfterMedia(target, text);
+      return fallback;
     }
+    return { channel: "umibot", error: `voice: ${voiceError} | fallback file: ${fallback.error}` };
   }
 
-  // 判断是否为文档/文件（非图片、非音频、非视频的本地文件）
-  if (isLocalPath && !isImageFile(mediaUrl) && !isAudioFile(mediaUrl)) {
-    return sendDocumentFile(ctx);
+  if (isVideoFile(mediaUrl, mimeType)) {
+    const result = await sendVideoMsg(target, mediaUrl);
+    if (!result.error && text?.trim()) await sendTextAfterMedia(target, text);
+    return result;
   }
 
-  // === 以下为图片发送逻辑（原有逻辑） ===
-
-  const isDataUrl = mediaUrl.startsWith("data:");
-  
-  let processedMediaUrl = mediaUrl;
-  
-  if (isLocalPath) {
-    console.log(`[umibot] sendMedia: local file path detected: ${mediaUrl}`);
-    
-    try {
-      if (!(await fileExistsAsync(mediaUrl))) {
-        return { channel: "umibot", error: `本地文件不存在: ${mediaUrl}` };
-      }
-      
-      // 文件大小校验
-      const sizeCheck = checkFileSize(mediaUrl);
-      if (!sizeCheck.ok) {
-        return { channel: "umibot", error: sizeCheck.error! };
-      }
-      
-      const fileBuffer = await readFileAsync(mediaUrl);
-      const base64Data = fileBuffer.toString("base64");
-      
-      const ext = path.extname(mediaUrl).toLowerCase();
-      const mimeTypes: Record<string, string> = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-      };
-      
-      const mimeType = mimeTypes[ext];
-      if (!mimeType) {
-        return { 
-          channel: "umibot", 
-          error: `不支持的图片格式: ${ext}。支持的格式: ${Object.keys(mimeTypes).join(", ")}` 
-        };
-      }
-      
-      processedMediaUrl = `data:${mimeType};base64,${base64Data}`;
-      console.log(`[umibot] sendMedia: local file converted to Base64 (size: ${fileBuffer.length} bytes, type: ${mimeType})`);
-      
-    } catch (readErr) {
-      const errMsg = readErr instanceof Error ? readErr.message : String(readErr);
-      console.error(`[umibot] sendMedia: failed to read local file: ${errMsg}`);
-      return { channel: "umibot", error: `读取本地文件失败: ${errMsg}` };
-    }
-  } else if (!isHttpUrl && !isDataUrl) {
-    console.log(`[umibot] sendMedia: unsupported media format: ${mediaUrl.slice(0, 50)}`);
-    return { 
-      channel: "umibot", 
-      error: `不支持的媒体格式: ${mediaUrl.slice(0, 50)}...。支持: 公网 URL、Base64 Data URL 或本地文件路径（图片/音频）。` 
-    };
-  } else if (isDataUrl) {
-    console.log(`[umibot] sendMedia: sending Base64 image (length: ${mediaUrl.length})`);
-  } else {
-    console.log(`[umibot] sendMedia: sending image URL: ${mediaUrl.slice(0, 80)}...`);
+  // 非图片、非音频、非视频 → 文件发送
+  if (!isImageFile(mediaUrl, mimeType) && !isAudioFile(mediaUrl, mimeType) && !isVideoFile(mediaUrl, mimeType)) {
+    const result = await sendDocument(target, mediaUrl);
+    if (!result.error && text?.trim()) await sendTextAfterMedia(target, text);
+    return result;
   }
 
+  // 默认：图片（sendPhoto 内置 URL fallback）
+  const result = await sendPhoto(target, mediaUrl);
+  if (!result.error && text?.trim()) await sendTextAfterMedia(target, text);
+  return result;
+}
+
+/** 发送媒体后附带文本说明 */
+async function sendTextAfterMedia(ctx: MediaTargetContext, text: string): Promise<void> {
   try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
-    const target = parseTarget(to);
-
-    let imageResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      imageResult = await sendC2CImageMessage(
-        accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined, isLocalPath ? mediaUrl : undefined
-      );
-    } else if (target.type === "group") {
-      imageResult = await sendGroupImageMessage(
-        accessToken, target.id, processedMediaUrl, replyToId ?? undefined, undefined
-      );
-    } else {
-      const displayUrl = isLocalPath ? "[本地文件]" : mediaUrl;
-      const textWithUrl = text ? `${text}\n${displayUrl}` : displayUrl;
-      const result = await sendChannelMessage(accessToken, target.id, textWithUrl, replyToId ?? undefined);
-      return { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
+    const token = await getToken(ctx.account);
+    if (ctx.targetType === "c2c") {
+      await sendC2CMessage(token, ctx.targetId, text, ctx.account.umi6Sn, ctx.replyToId, ctx.roomId);
+    } else if (ctx.targetType === "group") {
+      await sendGroupMessage(token, ctx.targetId, text, ctx.replyToId);
     }
-
-    if (text?.trim()) {
-      try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
-      } catch (textErr) {
-        console.error(`[umibot] Failed to send text after image: ${textErr}`);
-      }
-    }
-
-  return { channel: "umibot", messageId: imageResult.id, timestamp: imageResult.timestamp, refIdx: (imageResult as any).ext_info?.ref_idx };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { channel: "umibot", error: message };
+    console.error(`[umibot] sendTextAfterMedia failed: ${err}`);
   }
 }
 
-/**
- * 发送语音文件消息
- * 流程类似图片发送：读取本地音频文件 → 转为 SILK Base64 → 上传 → 发送
- */
-async function sendVoiceFile(ctx: MediaOutboundContext): Promise<OutboundResult> {
-  const { to, text, replyToId, account, mediaUrl } = ctx;
-
-  console.log(`[umibot] sendVoiceFile: ${mediaUrl}`);
-
-  // 等待文件就绪（TTS 工具异步生成，文件可能还没写完）
-  const fileSize = await waitForFile(mediaUrl);
-  if (fileSize === 0) {
-    return { channel: "umibot", error: `语音生成失败，请稍后重试` };
-  }
-
-  try {
-    // 尝试转换为 SILK 格式（QQ 语音要求 SILK 格式），支持配置直传格式跳过转换
-    const directFormats = account.config?.audioFormatPolicy?.uploadDirectFormats ?? account.config?.voiceDirectUploadFormats;
-    const silkBase64 = await audioFileToSilkBase64(mediaUrl, directFormats);
-    if (!silkBase64) {
-      // 如果无法转换为 SILK，直接读取文件作为 Base64 上传（让 API 尝试处理）
-      const buf = await readFileAsync(mediaUrl);
-      const fallbackBase64 = buf.toString("base64");
-      console.log(`[umibot] sendVoiceFile: not SILK format, uploading raw file (${formatFileSize(buf.length)})`);
-
-      const accessToken = await getAccessToken(account.appId!, account.clientSecret!, account.umi6Sn);
-      const target = parseTarget(to);
-
-      let result: { id: string; timestamp: number | string };
-      if (target.type === "c2c") {
-        result = await sendC2CVoiceMessage(accessToken, target.id, fallbackBase64, replyToId ?? undefined);
-      } else if (target.type === "group") {
-        result = await sendGroupVoiceMessage(accessToken, target.id, fallbackBase64, replyToId ?? undefined);
-      } else {
-        const r = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
-        return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
-      }
-
-      return { channel: "umibot", messageId: result.id, timestamp: result.timestamp };
-    }
-
-    console.log(`[umibot] sendVoiceFile: SILK format ready, uploading...`);
-
-    const accessToken = await getAccessToken(account.appId!, account.clientSecret!, account.umi6Sn);
-    const target = parseTarget(to);
-
-    let voiceResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      voiceResult = await sendC2CVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-    } else if (target.type === "group") {
-      voiceResult = await sendGroupVoiceMessage(accessToken, target.id, silkBase64, replyToId ?? undefined);
-    } else {
-      const r = await sendChannelMessage(accessToken, target.id, `[语音消息暂不支持频道发送]`, replyToId ?? undefined);
-      return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
-    }
-
-    // 如果有文本说明，再发送一条文本消息
-    if (text?.trim()) {
-      try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
-      } catch (textErr) {
-        console.error(`[umibot] Failed to send text after voice: ${textErr}`);
-      }
-    }
-
-    console.log(`[umibot] sendVoiceFile: voice message sent`);
-    return { channel: "umibot", messageId: voiceResult.id, timestamp: voiceResult.timestamp, refIdx: (voiceResult as any).ext_info?.ref_idx };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[umibot] sendVoiceFile: failed: ${message}`);
-    return { channel: "umibot", error: message };
-  }
+/** 从路径/URL 中提取扩展名（去除查询参数和 hash） */
+function getCleanExt(filePath: string): string {
+  const cleanPath = filePath.split("?")[0]!.split("#")[0]!;
+  return path.extname(cleanPath).toLowerCase();
 }
 
-/** 判断文件是否为图片格式 */
-function isImageFile(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
+/** 判断文件是否为图片格式（MIME 优先，扩展名回退） */
+function isImageFile(filePath: string, mimeType?: string): boolean {
+  if (mimeType) {
+    if (mimeType.startsWith("image/")) return true;
+  }
+  const ext = getCleanExt(filePath);
   return [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext);
 }
 
-/** 判断文件/URL 是否为视频格式 */
-function isVideoFile(filePath: string): boolean {
-  // 去掉 URL query 参数后判断扩展名
-  const cleanPath = filePath.split("?")[0]!;
-  const ext = path.extname(cleanPath).toLowerCase();
+/** 判断文件/URL 是否为视频格式（MIME 优先，扩展名回退） */
+function isVideoFile(filePath: string, mimeType?: string): boolean {
+  if (mimeType) {
+    if (mimeType.startsWith("video/")) return true;
+  }
+  const ext = getCleanExt(filePath);
   return [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv"].includes(ext);
-}
-
-/**
- * 发送视频消息（公网 URL）
- */
-async function sendVideoUrl(ctx: MediaOutboundContext): Promise<OutboundResult> {
-  const { to, text, replyToId, account, mediaUrl } = ctx;
-
-  console.log(`[umibot] sendVideoUrl: ${mediaUrl}`);
-
-  if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
-  }
-
-  try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
-    const target = parseTarget(to);
-
-    let videoResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      videoResult = await sendC2CVideoMessage(accessToken, target.id, mediaUrl, undefined, replyToId ?? undefined);
-    } else if (target.type === "group") {
-      videoResult = await sendGroupVideoMessage(accessToken, target.id, mediaUrl, undefined, replyToId ?? undefined);
-    } else {
-      const r = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-      return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
-    }
-
-    // 如果有文本说明，再发送一条文本消息
-    if (text?.trim()) {
-      try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
-      } catch (textErr) {
-        console.error(`[umibot] Failed to send text after video: ${textErr}`);
-      }
-    }
-
-    console.log(`[umibot] sendVideoUrl: video message sent`);
-    return { channel: "umibot", messageId: videoResult.id, timestamp: videoResult.timestamp, refIdx: (videoResult as any).ext_info?.ref_idx };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[umibot] sendVideoUrl: failed: ${message}`);
-    return { channel: "umibot", error: message };
-  }
-}
-
-/**
- * 发送本地视频文件
- * 流程：读取本地文件 → Base64 → 上传(file_type=2) → 发送
- */
-async function sendVideoFile(ctx: MediaOutboundContext): Promise<OutboundResult> {
-  const { to, text, replyToId, account, mediaUrl } = ctx;
-
-  console.log(`[umibot] sendVideoFile: ${mediaUrl}`);
-
-  if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
-  }
-
-  try {
-    if (!(await fileExistsAsync(mediaUrl))) {
-      return { channel: "umibot", error: `视频文件不存在: ${mediaUrl}` };
-    }
-
-    // 文件大小校验
-    const sizeCheck = checkFileSize(mediaUrl);
-    if (!sizeCheck.ok) {
-      return { channel: "umibot", error: sizeCheck.error! };
-    }
-
-    const fileBuffer = await readFileAsync(mediaUrl);
-    const videoBase64 = fileBuffer.toString("base64");
-    console.log(`[umibot] sendVideoFile: Read local video (${formatFileSize(fileBuffer.length)})`);
-
-    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
-    const target = parseTarget(to);
-
-    let videoResult: { id: string; timestamp: number | string };
-    if (target.type === "c2c") {
-      videoResult = await sendC2CVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined, undefined, mediaUrl);
-    } else if (target.type === "group") {
-      videoResult = await sendGroupVideoMessage(accessToken, target.id, undefined, videoBase64, replyToId ?? undefined);
-    } else {
-      const r = await sendChannelMessage(accessToken, target.id, `[视频消息暂不支持频道发送]`, replyToId ?? undefined);
-      return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
-    }
-
-    // 如果有文本说明，再发送一条文本消息
-    if (text?.trim()) {
-      try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
-      } catch (textErr) {
-        console.error(`[umibot] Failed to send text after video: ${textErr}`);
-      }
-    }
-
-    console.log(`[umibot] sendVideoFile: video message sent`);
-    return { channel: "umibot", messageId: videoResult.id, timestamp: videoResult.timestamp, refIdx: (videoResult as any).ext_info?.ref_idx };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[umibot] sendVideoFile: failed: ${message}`);
-    return { channel: "umibot", error: message };
-  }
-}
-
-/**
- * 发送文件消息
- * 流程：读取本地文件 → Base64 → 上传(file_type=4) → 发送
- * 支持本地文件路径和公网 URL
- */
-async function sendDocumentFile(ctx: MediaOutboundContext): Promise<OutboundResult> {
-  const { to, text, replyToId, account, mediaUrl } = ctx;
-
-  console.log(`[umibot] sendDocumentFile: ${mediaUrl}`);
-
-  if (!account.appId || !account.clientSecret) {
-    return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
-  }
-
-  const isHttpUrl = mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://");
-  const fileName = sanitizeFileName(path.basename(mediaUrl));
-
-  try {
-    const accessToken = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
-    const target = parseTarget(to);
-
-    let fileResult: { id: string; timestamp: number | string };
-
-    if (isHttpUrl) {
-      // 公网 URL：通过 url 参数上传
-      console.log(`[umibot] sendDocumentFile: uploading via URL: ${mediaUrl}`);
-      if (target.type === "c2c") {
-        fileResult = await sendC2CFileMessage(accessToken, target.id, undefined, mediaUrl, replyToId ?? undefined, fileName);
-      } else if (target.type === "group") {
-        fileResult = await sendGroupFileMessage(accessToken, target.id, undefined, mediaUrl, replyToId ?? undefined, fileName);
-      } else {
-        const r = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-        return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
-      }
-    } else {
-      // 本地文件：读取转 Base64 上传
-      if (!(await fileExistsAsync(mediaUrl))) {
-        return { channel: "umibot", error: `本地文件不存在: ${mediaUrl}` };
-      }
-
-      // 文件大小校验
-      const docSizeCheck = checkFileSize(mediaUrl);
-      if (!docSizeCheck.ok) {
-        return { channel: "umibot", error: docSizeCheck.error! };
-      }
-
-      const fileBuffer = await readFileAsync(mediaUrl);
-      if (fileBuffer.length === 0) {
-        return { channel: "umibot", error: `文件内容为空: ${mediaUrl}` };
-      }
-
-      const fileBase64 = fileBuffer.toString("base64");
-      console.log(`[umibot] sendDocumentFile: read local file (${formatFileSize(fileBuffer.length)}), uploading...`);
-
-      if (target.type === "c2c") {
-        fileResult = await sendC2CFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName, mediaUrl);
-      } else if (target.type === "group") {
-        fileResult = await sendGroupFileMessage(accessToken, target.id, fileBase64, undefined, replyToId ?? undefined, fileName);
-      } else {
-        const r = await sendChannelMessage(accessToken, target.id, `[文件消息暂不支持频道发送]`, replyToId ?? undefined);
-        return { channel: "umibot", messageId: r.id, timestamp: r.timestamp };
-      }
-    }
-
-    // 如果有附带文本说明，再发送一条文本消息
-    if (text?.trim()) {
-      try {
-        if (target.type === "c2c") {
-          await sendC2CMessage(accessToken, target.id, text, account.umi6Sn, replyToId ?? undefined);
-        } else if (target.type === "group") {
-          await sendGroupMessage(accessToken, target.id, text, replyToId ?? undefined);
-        }
-      } catch (textErr) {
-        console.error(`[umibot] Failed to send text after file: ${textErr}`);
-      }
-    }
-
-    console.log(`[umibot] sendDocumentFile: file message sent`);
-    return { channel: "umibot", messageId: fileResult.id, timestamp: fileResult.timestamp, refIdx: (fileResult as any).ext_info?.ref_idx };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[umibot] sendDocumentFile: failed: ${message}`);
-    return { channel: "umibot", error: message };
-  }
 }
 
 /**

@@ -1,9 +1,10 @@
 {
   "id": "umibot",
-  "name": "Umi Bot Channel",
-  "description": "Umi Bot channel plugin with message support, cron jobs, and proactive messaging",
+  "name": "OpenClaw UMI Bot",
+  "description": "UMI Bot channel plugin with message support, cron jobs, and proactive messaging",
   "channels": ["umibot"],
-  "skills": ["skills/umibot-cron", "skills/umibot-media"],
+  "extensions": ["./preload.cjs"],
+  "skills": ["skills/umibot-channel", "skills/umibot-remind", "skills/umibot-media"],
   "capabilities": {
     "proactiveMessaging": true,
     "cronJobs": true

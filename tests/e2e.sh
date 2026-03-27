@@ -158,7 +158,7 @@ INSTALL_OUT=$(assert_success "install.from_source" openclaw plugins install .) |
 
 # 1.2 验证插件出现在列表中
 LIST_OUT=$(assert_success "install.plugins_list" openclaw plugins list) || true
-assert_contains "install.qqbot_in_list" "$LIST_OUT" "umibot" || true
+assert_contains "install.umibot_in_list" "$LIST_OUT" "umibot" || true
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TEST SUITE 2: openclaw channels add — 单 Bot & 多 Bot
@@ -171,7 +171,7 @@ assert_success "channel.bot1_add" \
 
 # 2.2 验证 Bot1 通道已添加
 CH_LIST=$(assert_success "channel.list_after_bot1" openclaw channels list) || true
-assert_contains "channel.qqbot_visible" "$CH_LIST" "umibot" || true
+assert_contains "channel.umibot_visible" "$CH_LIST" "umibot" || true
 
 # 2.3 添加 Bot2（多账户）
 assert_success "channel.bot2_add" \

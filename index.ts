@@ -3,23 +3,27 @@ import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import { umibotPlugin } from "./src/channel.js";
 import { setQQBotRuntime } from "./src/runtime.js";
+import { registerChannelTool } from "./src/tools/channel.js";
+import { registerRemindTool } from "./src/tools/remind.js";
 
 const plugin = {
   id: "umibot",
-  name: "Umi Bot",
-  description: "Umi Bot channel plugin",
+  name: "UMI Bot",
+  description: "UMI Bot channel plugin",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     setQQBotRuntime(api.runtime);
-    api.registerChannel({ plugin: umibotPlugin });
+    api.registerChannel({ plugin: umibotPlugin as any });
+    registerChannelTool(api);
+    registerRemindTool(api);
   },
 };
 
 export default plugin;
 
-export { umibotPlugin, umibotPlugin as qqbotPlugin } from "./src/channel.js";
+export { umibotPlugin } from "./src/channel.js";
 export { setQQBotRuntime, getQQBotRuntime } from "./src/runtime.js";
-export { umibotOnboardingAdapter, umibotOnboardingAdapter as qqbotOnboardingAdapter } from "./src/onboarding.js";
+export { umibotOnboardingAdapter } from "./src/onboarding.js";
 export * from "./src/types.js";
 export * from "./src/api.js";
 export * from "./src/config.js";

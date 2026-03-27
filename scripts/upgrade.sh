@@ -29,7 +29,7 @@ cleanup_installation() {
   echo ">>> 处理 $APP_NAME 安装..."
 
   # 1. 删除所有可能的旧版扩展目录（多历史插件 ID 变体）
-  for dir_name in umibot openclaw-umibot openclaw-umi; do
+  for dir_name in umibot umibot openclaw-umi; do
     if [ -d "$EXTENSION_DIR/$dir_name" ]; then
       echo "删除旧版本插件: $EXTENSION_DIR/$dir_name"
       rm -rf "$EXTENSION_DIR/$dir_name"
@@ -52,7 +52,7 @@ cleanup_installation() {
       }
       
       // 清理 plugins.entries 中的所有历史插件 ID
-      const legacyIds = ['umibot', 'openclaw-umibot', 'openclaw-umi', '@mili-wang/umibot', '@tencent-connect/umibot', '@tencent-connect/openclaw-umi', '@tencent-connect/openclaw-umibot'];
+      const legacyIds = ['umibot', 'umibot', 'openclaw-umi', '@mili-wang/umibot', '@tencent-connect/umibot', '@tencent-connect/openclaw-umi', '@tencent-connect/umibot'];
       if (config.plugins && config.plugins.entries) {
         for (const id of legacyIds) {
           if (config.plugins.entries[id]) {

@@ -20,7 +20,7 @@ import { getQQBotDataDir } from "./utils/platform.js";
 // ============ 存储的消息摘要 ============
 
 export interface RefIndexEntry {
-  /** 消息文本内容摘要 */
+  /** 消息文本内容（完整保存） */
   content: string;
   /** 发送者 ID */
   senderId: string;
@@ -44,7 +44,7 @@ export interface RefAttachmentSummary {
   contentType?: string;
   /** 语音转录文本（入站：STT/ASR识别结果；出站：TTS原文本） */
   transcript?: string;
-  /** 语音转录来源：stt=本地STT、asr=QQ官方ASR、tts=TTS原文本、fallback=兜底文案 */
+  /** 语音转录来源：stt=本地STT、asr=平台ASR、tts=TTS原文本、fallback=兜底文案 */
   transcriptSource?: "stt" | "asr" | "tts" | "fallback";
   /** 已下载到本地的文件路径（持久化后可供引用时访问） */
   localPath?: string;
@@ -56,7 +56,6 @@ export interface RefAttachmentSummary {
 
 const STORAGE_DIR = getQQBotDataDir("data");
 const REF_INDEX_FILE = path.join(STORAGE_DIR, "ref-index.jsonl");
-const MAX_CONTENT_LENGTH = 500; // 存储的消息内容最大字符数
 const MAX_ENTRIES = 50000; // 内存中最大缓存条目数
 const TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 天
 const COMPACT_THRESHOLD_RATIO = 2; // 文件行数超过有效条目 N 倍时 compact
@@ -234,7 +233,7 @@ export function setRefIndex(refIdx: string, entry: RefIndexEntry): void {
 
   const now = Date.now();
   store.set(refIdx, {
-    content: entry.content.slice(0, MAX_CONTENT_LENGTH),
+    content: entry.content,
     senderId: entry.senderId,
     senderName: entry.senderName,
     timestamp: entry.timestamp,
@@ -247,7 +246,7 @@ export function setRefIndex(refIdx: string, entry: RefIndexEntry): void {
   appendLine({
     k: refIdx,
     v: {
-      content: entry.content.slice(0, MAX_CONTENT_LENGTH),
+      content: entry.content,
       senderId: entry.senderId,
       senderName: entry.senderName,
       timestamp: entry.timestamp,

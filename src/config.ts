@@ -13,7 +13,7 @@ function normalizeAppId(raw: unknown): string {
 }
 
 /**
- * 列出所有 QQBot 账户 ID
+ * 列出所有 UMIBot 账户 ID
  */
 export function listQQBotAccountIds(cfg: OpenClawConfig): string[] {
   const ids = new Set<string>();
@@ -54,7 +54,7 @@ export function resolveDefaultQQBotAccountId(cfg: OpenClawConfig): string {
 }
 
 /**
- * 解析 QQBot 账户配置
+ * 解析 UMIBot 账户配置
  */
 export function resolveQQBotAccount(
   cfg: OpenClawConfig,
@@ -71,19 +71,12 @@ export function resolveQQBotAccount(
   let secretSource: "config" | "file" | "env" | "none" = "none";
 
   if (resolvedAccountId === DEFAULT_ACCOUNT_ID) {
-    // 默认账户从顶层读取
+    // 默认账户从顶层读取（展开所有字段，避免遗漏新增配置项）
+    const { accounts: _accounts, ...topLevelConfig } = umibot ?? {} as QQBotChannelConfig;
     accountConfig = {
-      enabled: umibot?.enabled,
-      name: umibot?.name,
-      appId: umibot?.appId,
-      clientSecret: umibot?.clientSecret,
       umi6Sn: umibot?.umi6Sn,
-      clientSecretFile: umibot?.clientSecretFile,
-      dmPolicy: umibot?.dmPolicy,
-      allowFrom: umibot?.allowFrom,
-      systemPrompt: umibot?.systemPrompt,
-      imageServerBaseUrl: umibot?.imageServerBaseUrl,
-      markdownSupport: umibot?.markdownSupport ?? false,
+      ...topLevelConfig,
+      markdownSupport: umibot?.markdownSupport ?? true,
     };
     appId = normalizeAppId(umibot?.appId);
   } else {

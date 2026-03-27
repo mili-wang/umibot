@@ -3,16 +3,38 @@
  * [修复版] 已重构为支持多实例并发，消除全局变量冲突
  */
 
+import os from "node:os";
 import { computeFileHash, getCachedFileInfo, setCachedFileInfo } from "./utils/upload-cache.js";
 import { sanitizeFileName } from "./utils/platform.js";
 
-// 测试环境
-// const API_BASE = "https://testaest-v1.umi6.com";
-// 生产环境
+// ============ 自定义错误 ============
+
+/** API 请求错误，携带 HTTP status code */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly path: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 const API_BASE = "https://qyapi.umi6.com";
+
+// ============ Plugin User-Agent ============
+// 格式: QQBotPlugin/{version} (Node/{nodeVersion}; {os})
+// 示例: QQBotPlugin/1.6.0 (Node/22.14.0; darwin)
+import { getPackageVersion } from "./utils/pkg-version.js";
+const _pluginVersion = getPackageVersion(import.meta.url);
+export const PLUGIN_USER_AGENT = `QQBotPlugin/${_pluginVersion} (Node/${process.versions.node}; ${os.platform()})`;
 
 // 运行时配置
 let currentMarkdownSupport = false;
+// 默认关闭输入状态通知接口（/v2/users/{openid}/messages）。
+// 仅当显式设置 QQBOT_ENABLE_INPUT_NOTIFY=1 时启用。
+const ENABLE_C2C_INPUT_NOTIFY = process.env.QQBOT_ENABLE_INPUT_NOTIFY === "1";
 
 // 出站消息回调钩子：消息发送成功且回包含 ext_info.ref_idx 时触发
 // 由外层（gateway/outbound）注册，用于统一缓存 bot 出站消息的 refIdx
@@ -45,7 +67,6 @@ export function onMessageSent(callback: OnMessageSentCallback): void {
 
 /**
  * 初始化 API 配置
- * @param options.markdownSupport - 是否支持 markdown 消息（默认 false，需要机器人具备该权限才能启用）
  */
 export function initApiConfig(options: { markdownSupport?: boolean }): void {
   currentMarkdownSupport = options.markdownSupport === true;
@@ -79,8 +100,12 @@ export async function getAccessToken(appId: string, clientSecret: string, umi6Sn
   const normalizedAppId = String(appId).trim();
   const cachedToken = tokenCacheMap.get(normalizedAppId);
 
-  // 检查缓存：未过期 且 appId 未变化 时复用
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 5 * 60 * 1000) {
+  // 检查缓存：未过期时复用
+  // 提前刷新阈值：取 expiresIn 的 1/3 和 5 分钟的较小值，避免短有效期 token 永远被判定过期
+  const REFRESH_AHEAD_MS = cachedToken
+    ? Math.min(5 * 60 * 1000, (cachedToken.expiresAt - Date.now()) / 3)
+    : 0;
+  if (cachedToken && Date.now() < cachedToken.expiresAt - REFRESH_AHEAD_MS) {
     return cachedToken.token;
   }
 
@@ -109,11 +134,15 @@ export async function getAccessToken(appId: string, clientSecret: string, umi6Sn
  * 实际执行 Token 获取的内部函数
  */
 async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string): Promise<string> {
-  const requestBody = { app_id: appId, app_secret: clientSecret, umi6_sn: umi6Sn };
+  const sn = String(umi6Sn ?? "").trim();
+  if (!sn) {
+    throw new Error("getAppToken 失败：umi6Sn 为空。请在 OpenClaw 账号配置里填写与 appId 对应的 umi6Sn（租户路径段）。");
+  }
+  const requestBody = { app_id: appId, app_secret: clientSecret, umi6_sn: sn };
   const requestHeaders = { "Content-Type": "application/json" };
-  const TOKEN_URL = `${API_BASE}/${umi6Sn}/api/lobster.auth/getAppToken`;
+  const TOKEN_URL = `${API_BASE}/${sn}/api/lobster.auth/getAppToken`;
   // 打印请求信息（隐藏敏感信息）
-  console.log(`[umibot-api:${appId}] >>> POST ${TOKEN_URL}`);
+  console.log(`[umibot-api:${appId}] >>> POST ${TOKEN_URL} ${umi6Sn}`);
 
   let response: Response;
   try {
@@ -135,38 +164,59 @@ async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string)
   const tokenTraceId = response.headers.get("x-tps-trace-id") ?? "";
   console.log(`[umibot-api:${appId}] <<< Status: ${response.status} ${response.statusText}${tokenTraceId ? ` | TraceId: ${tokenTraceId}` : ""}`);
 
-  let data: { access_token?: string; expires_in?: number; domain?: string };
+  type TokenPayload = { access_token?: string; expires_in?: number; domain?: string };
   let rawBody: string;
+  let parsed: {
+    data?: TokenPayload | null;
+    access_token?: string;
+    expires_in?: number;
+    domain?: string;
+    message?: string;
+    msg?: string;
+    code?: number;
+  };
   try {
     rawBody = await response.text();
     // 隐藏 token 值
     const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"');
     console.log(`[umibot-api:${appId}] <<< Body:`, logBody);
-    data = JSON.parse(rawBody)?.data as {
-      access_token?: string;
-      expires_in?: number;
-      domain?: string;
-    };
+    parsed = JSON.parse(rawBody) as typeof parsed;
   } catch (err) {
     console.error(`[umibot-api:${appId}] <<< Parse error:`, err);
     throw new Error(`Failed to parse access_token response: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  if (!data.access_token) {
-    throw new Error(`Failed to get access_token: ${JSON.stringify(data)}`);
+  let payload: TokenPayload | null = null;
+  const inner = parsed?.data;
+  if (inner && typeof inner === "object" && typeof inner.access_token === "string" && inner.access_token.length > 0) {
+    payload = inner;
+  } else if (typeof parsed?.access_token === "string" && parsed.access_token.length > 0) {
+    payload = {
+      access_token: parsed.access_token,
+      expires_in: parsed.expires_in,
+      domain: parsed.domain,
+    };
   }
 
-  const expiresAt = Date.now() + (data.expires_in ?? 7200) * 1000;
-  
+  if (!payload?.access_token) {
+    const hint = parsed?.message ?? parsed?.msg ?? "";
+    throw new Error(
+      `getAppToken 未返回有效 token（HTTP ${response.status}）${hint ? `：${hint}` : ""}。请核对 appId、clientSecret、umi6Sn 是否同一套且 umi6Sn 与接口路径一致；完整 data 字段见日志上一行 Body。`,
+    );
+  }
+
+  const { access_token: accessToken, expires_in: expiresIn, domain } = payload;
+  const expiresAt = Date.now() + (expiresIn ?? 7200) * 1000;
+
   tokenCacheMap.set(appId, {
-    token: data.access_token,
+    token: accessToken,
     expiresAt,
     appId,
-    domain: data.domain
+    domain,
   });
 
   console.log(`[umibot-api:${appId}] Token cached, expires at: ${new Date(expiresAt).toISOString()}`);
-  return data.access_token;
+  return accessToken;
 }
 
 /**
@@ -211,7 +261,8 @@ export function getTokenStatus(appId: string): { status: "valid" | "expired" | "
   if (!cached) {
     return { status: "none", expiresAt: null };
   }
-  const isValid = Date.now() < cached.expiresAt - 5 * 60 * 1000;
+  const remaining = cached.expiresAt - Date.now();
+  const isValid = remaining > Math.min(5 * 60 * 1000, remaining / 3);
   return { status: isValid ? "valid" : "expired", expiresAt: cached.expiresAt };
 }
 
@@ -243,6 +294,7 @@ export async function apiRequest<T = unknown>(
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
+    "User-Agent": PLUGIN_USER_AGENT,
   };
   
   const isFileUpload = path.includes("/files");
@@ -295,26 +347,49 @@ export async function apiRequest<T = unknown>(
   const traceId = res.headers.get("x-tps-trace-id") ?? "";
   console.log(`[umibot-api] <<< Status: ${res.status} ${res.statusText}${traceId ? ` | TraceId: ${traceId}` : ""}`);
 
-  let data: T;
   let rawBody: string;
   console.log(`[umibot-api] <<< Body: ${JSON.stringify(res)}`);
   try {
     rawBody = await res.text();
-    console.log(`[umibot-api] <<< Body:`, rawBody);
-    data = JSON.parse(rawBody) as T;
-    console.log(`[umibot-api] <<< Data: ${JSON.stringify(data)}`);
   } catch (err) {
-    throw new Error(`Failed to parse response[${path}]: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`读取响应失败[${path}]: ${err instanceof Error ? err.message : String(err)}`);
   }
+  console.log(`[umibot-api] <<< Body:`, rawBody);
+
+  // 检测非 JSON 响应（HTML 网关错误页 / CDN 限流页等）
+  const contentType = res.headers.get("content-type") ?? "";
+  const isHtmlResponse = contentType.includes("text/html") || rawBody.trimStart().startsWith("<");
 
   if (!res.ok) {
-    const error = data as { message?: string | unknown; code?: number };
-    const msg = error.message;
-    const msgStr = msg == null ? JSON.stringify(data) : (typeof msg === "string" ? msg : JSON.stringify(msg));
-    throw new Error(`API Error [${path}]: ${msgStr}`);
+    if (isHtmlResponse) {
+      // HTML 响应 = 网关/限流层返回的错误页，给出友好提示
+      const statusHint = res.status === 502 || res.status === 503 || res.status === 504
+        ? "调用发生异常，请稍候重试"
+        : res.status === 429
+          ? "请求过于频繁，已被限流"
+          : `开放平台返回 HTTP ${res.status}`;
+      throw new ApiError(`${statusHint}（${path}），请稍后重试`, res.status, path);
+    }
+    // JSON 错误响应
+    try {
+      const error = JSON.parse(rawBody) as { message?: string; code?: number };
+      throw new ApiError(`API Error [${path}]: ${error.message ?? rawBody}`, res.status, path);
+    } catch (parseErr) {
+      if (parseErr instanceof ApiError) throw parseErr;
+      throw new ApiError(`API Error [${path}] HTTP ${res.status}: ${rawBody.slice(0, 200)}`, res.status, path);
+    }
   }
 
-  return data;
+  // 成功响应但不是 JSON（极端异常情况）
+  if (isHtmlResponse) {
+    throw new Error(`UMI 服务端返回了非 JSON 响应（${path}），可能是临时故障，请稍后重试`);
+  }
+
+  try {
+    return JSON.parse(rawBody) as T;
+  } catch {
+    throw new Error(`开放平台响应格式异常（${path}），请稍后重试`);
+  }
 }
 
 // ============ 上传重试（指数退避） ============
@@ -356,11 +431,71 @@ async function apiRequestWithRetry<T = unknown>(
   throw lastError!;
 }
 
+// ============ 完成上传重试（无条件，任何错误都重试） ============
+
+const COMPLETE_UPLOAD_MAX_RETRIES = 2;
+const COMPLETE_UPLOAD_BASE_DELAY_MS = 2000;
+
 /**
- * 使用自定义 WSS 时，openclaw 能否收到消息取决于该 WSS 后端是否按协议推送事件。
- * 后端必须对「别人发给机器人的消息」下发 op=0 + t=C2C_MESSAGE_CREATE（等）且 d 结构符合 types.ts。
- * 详见 docs/gateway-ws-backend.md。
+ * 完成上传专用重试：无条件重试所有错误（包括 4xx、5xx、网络错误、超时等）
+ * 分片上传完成接口的失败往往是平台侧异步处理未就绪，重试通常能成功
  */
+async function completeUploadWithRetry(
+  accessToken: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<MediaUploadResponse> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= COMPLETE_UPLOAD_MAX_RETRIES; attempt++) {
+    try {
+      return await apiRequest<MediaUploadResponse>(accessToken, method, path, body);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (attempt < COMPLETE_UPLOAD_MAX_RETRIES) {
+        const delay = COMPLETE_UPLOAD_BASE_DELAY_MS * Math.pow(2, attempt);
+        console.warn(`[umibot-api] CompleteUpload attempt ${attempt + 1} failed, retrying in ${delay}ms: ${lastError.message.slice(0, 200)}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError!;
+}
+
+// ============ 分片完成重试（无条件，与 completeUpload 策略一致） ============
+
+const PART_FINISH_MAX_RETRIES = 2;
+const PART_FINISH_BASE_DELAY_MS = 1000;
+
+async function partFinishWithRetry(
+  accessToken: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<void> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= PART_FINISH_MAX_RETRIES; attempt++) {
+    try {
+      await apiRequest<Record<string, unknown>>(accessToken, method, path, body);
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (attempt < PART_FINISH_MAX_RETRIES) {
+        const delay = PART_FINISH_BASE_DELAY_MS * Math.pow(2, attempt);
+        console.warn(`[umibot-api] PartFinish attempt ${attempt + 1} failed, retrying in ${delay}ms: ${lastError.message.slice(0, 200)}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError!;
+}
+
 export async function getGatewayUrl(appId: string, appSecret: string): Promise<string> {
   // const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway");
   // console.log(`[umibot-api] getGatewayUrl: got url=${data?.url ?? "(empty)"}`);
@@ -413,8 +548,9 @@ function buildMessageBody(
   const body: Record<string, unknown> = currentMarkdownSupport
     ? {
         access_token: accessToken,
+        content,
         markdown: { content },
-        msg_type: 2,
+        msg_type: 0,
         msg_seq: msgSeq,
         uuid: openid,
         room_id
@@ -457,6 +593,9 @@ export async function sendC2CInputNotify(
   msgId?: string,
   inputSecond: number = 60
 ): Promise<{ refIdx?: string }> {
+  if (!ENABLE_C2C_INPUT_NOTIFY) {
+    return {};
+  }
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   const body = {
     msg_type: 6,
@@ -486,6 +625,23 @@ export async function sendChannelMessage(
     body.message_reference = { message_id: messageReference };
   }
   return apiRequest(accessToken, "POST", `/channels/${channelId}/messages`, body);
+}
+
+/**
+ * 发送频道私信消息
+ * @param guildId - 私信会话的 guild_id（由 DIRECT_MESSAGE_CREATE 事件提供）
+ * @param msgId - 被动回复时必填
+ */
+export async function sendDmMessage(
+  accessToken: string,
+  guildId: string,
+  content: string,
+  msgId?: string
+): Promise<{ id: string; timestamp: string }> {
+  return apiRequest(accessToken, "POST", `/dms/${guildId}/messages`, {
+    content,
+    ...(msgId ? { msg_id: msgId } : {}),
+  });
 }
 
 export async function sendGroupMessage(
@@ -543,6 +699,168 @@ export interface UploadMediaResponse {
   file_info: string;
   ttl: number;
   id?: string;
+}
+
+// ============ 大文件分片上传 API ============
+
+/** 分片信息 */
+export interface UploadPart {
+  /** 分片索引（从 1 开始） */
+  index: number;
+  /** 预签名上传链接 */
+  presigned_url: string;
+}
+
+/** 申请上传响应 */
+export interface UploadPrepareResponse {
+  /** 上传任务 ID */
+  upload_id: string;
+  /** 分块大小（字节） */
+  block_size: number;
+  /** 分片列表（含预签名链接） */
+  parts: UploadPart[];
+}
+
+/** 完成文件上传响应（与 UploadMediaResponse 一致） */
+export interface MediaUploadResponse {
+  /** 文件 UUID */
+  file_uuid: string;
+  /** 文件信息（用于发送消息），是 InnerUploadRsp 的序列化 */
+  file_info: string;
+  /** 文件信息过期时长（秒） */
+  ttl: number;
+}
+
+/** 申请上传时的文件哈希信息 */
+export interface UploadPrepareHashes {
+  /** 整个文件的 MD5（十六进制） */
+  md5: string;
+  /** 整个文件的 SHA1（十六进制） */
+  sha1: string;
+  /** 文件前 10002432 Bytes 的 MD5（十六进制）；文件不足该大小时为整文件 MD5 */
+  md5_10m: string;
+}
+
+/**
+ * 申请上传（C2C）
+ * POST /v2/users/{user_id}/upload_prepare
+ * 
+ * @param accessToken - 访问令牌
+ * @param userId - 用户 openid
+ * @param fileType - 业务类型（1=图片, 2=视频, 3=语音, 4=文件）
+ * @param fileName - 文件名
+ * @param fileSize - 文件大小（字节）
+ * @param hashes - 文件哈希信息（md5, sha1, md5_10m）
+ * @returns 上传任务 ID、分块大小、分片预签名链接列表
+ */
+export async function c2cUploadPrepare(
+  accessToken: string,
+  userId: string,
+  fileType: MediaFileType,
+  fileName: string,
+  fileSize: number,
+  hashes: UploadPrepareHashes,
+): Promise<UploadPrepareResponse> {
+  return apiRequest<UploadPrepareResponse>(
+    accessToken, "POST", `/v2/users/${userId}/upload_prepare`,
+    { file_type: fileType, file_name: fileName, file_size: fileSize, md5: hashes.md5, sha1: hashes.sha1, md5_10m: hashes.md5_10m },
+  );
+}
+
+/**
+ * 完成分片上传（C2C）
+ * POST /v2/users/{user_id}/upload_part_finish
+ * 
+ * @param accessToken - 访问令牌
+ * @param userId - 用户 openid
+ * @param uploadId - 上传任务 ID
+ * @param partIndex - 分片索引（从 1 开始）
+ * @param blockSize - 分块大小（字节）
+ * @param md5 - 分片数据的 MD5（十六进制）
+ */
+export async function c2cUploadPartFinish(
+  accessToken: string,
+  userId: string,
+  uploadId: string,
+  partIndex: number,
+  blockSize: number,
+  md5: string,
+): Promise<void> {
+  await partFinishWithRetry(
+    accessToken, "POST", `/v2/users/${userId}/upload_part_finish`,
+    { upload_id: uploadId, part_index: partIndex, block_size: blockSize, md5 },
+  );
+}
+
+/**
+ * 完成文件上传（C2C）
+ * POST /v2/users/{user_id}/files
+ * 
+ * @param accessToken - 访问令牌
+ * @param userId - 用户 openid
+ * @param uploadId - 上传任务 ID
+ * @returns 文件信息（file_uuid, file_info, ttl）
+ */
+export async function c2cCompleteUpload(
+  accessToken: string,
+  userId: string,
+  uploadId: string,
+): Promise<MediaUploadResponse> {
+  return completeUploadWithRetry(
+    accessToken, "POST", `/v2/users/${userId}/files`,
+    { upload_id: uploadId },
+  );
+}
+
+/**
+ * 申请上传（Group）
+ * POST /v2/groups/{group_id}/upload_prepare
+ */
+export async function groupUploadPrepare(
+  accessToken: string,
+  groupId: string,
+  fileType: MediaFileType,
+  fileName: string,
+  fileSize: number,
+  hashes: UploadPrepareHashes,
+): Promise<UploadPrepareResponse> {
+  return apiRequest<UploadPrepareResponse>(
+    accessToken, "POST", `/v2/groups/${groupId}/upload_prepare`,
+    { file_type: fileType, file_name: fileName, file_size: fileSize, md5: hashes.md5, sha1: hashes.sha1, md5_10m: hashes.md5_10m },
+  );
+}
+
+/**
+ * 完成分片上传（Group）
+ * POST /v2/groups/{group_id}/upload_part_finish
+ */
+export async function groupUploadPartFinish(
+  accessToken: string,
+  groupId: string,
+  uploadId: string,
+  partIndex: number,
+  blockSize: number,
+  md5: string,
+): Promise<void> {
+  await partFinishWithRetry(
+    accessToken, "POST", `/v2/groups/${groupId}/upload_part_finish`,
+    { upload_id: uploadId, part_index: partIndex, block_size: blockSize, md5 },
+  );
+}
+
+/**
+ * 完成文件上传（Group）
+ * POST /v2/groups/{group_id}/files
+ */
+export async function groupCompleteUpload(
+  accessToken: string,
+  groupId: string,
+  uploadId: string,
+): Promise<MediaUploadResponse> {
+  return completeUploadWithRetry(
+    accessToken, "POST", `/v2/groups/${groupId}/files`,
+    { upload_id: uploadId },
+  );
 }
 
 export async function uploadC2CMedia(
@@ -682,8 +1000,8 @@ export async function sendGroupImageMessage(accessToken: string, groupOpenid: st
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId, content);
 }
 
-export async function sendC2CVoiceMessage(accessToken: string, openid: string, voiceBase64: string, msgId?: string, ttsText?: string, filePath?: string): Promise<MessageResponse> {
-  const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VOICE, undefined, voiceBase64, false);
+export async function sendC2CVoiceMessage(accessToken: string, openid: string, voiceBase64?: string, voiceUrl?: string, msgId?: string, ttsText?: string, filePath?: string): Promise<MessageResponse> {
+  const uploadResult = await uploadC2CMedia(accessToken, openid, MediaFileType.VOICE, voiceUrl, voiceBase64, false);
   return sendC2CMediaMessage(accessToken, openid, uploadResult.file_info, msgId, undefined, { 
     mediaType: "voice", 
     ...(ttsText ? { ttsText } : {}),
@@ -691,8 +1009,8 @@ export async function sendC2CVoiceMessage(accessToken: string, openid: string, v
   });
 }
 
-export async function sendGroupVoiceMessage(accessToken: string, groupOpenid: string, voiceBase64: string, msgId?: string): Promise<{ id: string; timestamp: string }> {
-  const uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VOICE, undefined, voiceBase64, false);
+export async function sendGroupVoiceMessage(accessToken: string, groupOpenid: string, voiceBase64?: string, voiceUrl?: string, msgId?: string): Promise<{ id: string; timestamp: string }> {
+  const uploadResult = await uploadGroupMedia(accessToken, groupOpenid, MediaFileType.VOICE, voiceUrl, voiceBase64, false);
   return sendGroupMediaMessage(accessToken, groupOpenid, uploadResult.file_info, msgId);
 }
 
@@ -838,4 +1156,43 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       signal.addEventListener("abort", onAbort, { once: true });
     }
   });
+}
+
+// ============ 流式消息 API ============
+
+import type { StreamMessageRequest, StreamMessageResponse } from "./types.js";
+
+/**
+ * 发送流式消息（C2C 私聊）
+ * 
+ * 流式协议：
+ * - 首次调用时不传 stream_msg_id，由平台返回
+ * - 后续分片携带 stream_msg_id 和递增 msg_seq
+ * - input_state="1" 表示生成中，"10" 表示生成结束（终结状态）
+ * 
+ * @param accessToken - access_token
+ * @param openid - 用户 openid
+ * @param req - 流式消息请求体
+ * @returns 流式消息响应
+ */
+export async function sendC2CStreamMessage(
+  accessToken: string,
+  openid: string,
+  req: StreamMessageRequest,
+): Promise<StreamMessageResponse> {
+  const path = `/v2/users/${openid}/stream_messages`;
+  const body: Record<string, unknown> = {
+    input_mode: req.input_mode,
+    input_state: req.input_state,
+    content_type: req.content_type,
+    content_raw: req.content_raw,
+    event_id: req.event_id,
+    msg_id: req.msg_id,
+    msg_seq: req.msg_seq,
+    index: req.index,
+  };
+  if (req.stream_msg_id) {
+    body.stream_msg_id = req.stream_msg_id;
+  }
+  return apiRequest<StreamMessageResponse>(accessToken, "POST", path, body);
 }

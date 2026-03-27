@@ -212,7 +212,7 @@ interface WSPayload {
 
 **原因**：umibot 的**收消息**完全来自当前连接的 WSS。改用自定义地址（如 `wss://xxx.umi6.com/ws/...`）后，客户端不再连 UMI 官方网关，只会收到你的 WSS 后端主动下发的帧。若后端没有把「用户发给机器人的消息」转成并推送 **op=0、t=C2C_MESSAGE_CREATE**（或 AT_MESSAGE_CREATE、GROUP_AT_MESSAGE_CREATE 等）且 **d** 结构符合 `src/types.ts` 的 C2CMessageEvent/GuildMessageEvent/GroupMessageEvent，gateway 就不会往 openclaw 投递，表现为「发消息后 openclaw 接收不到」。
 
-**发送消息**仍走 `api.sgroup.qq.com` 的 HTTP 接口，与 WSS 地址无关，所以机器人主动发出去的消息对方能收到。
+**发送消息**仍走 `api.sgroup.umi.com` 的 HTTP 接口，与 WSS 地址无关，所以机器人主动发出去的消息对方能收到。
 
 **解决思路**：
 

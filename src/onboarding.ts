@@ -79,12 +79,12 @@ export const umibotOnboardingAdapter: ChannelOnboardingAdapter = {
     const accountOverrides = ctx.accountOverrides as Record<string, string> | undefined;
     const shouldPromptAccountIds = ctx.shouldPromptAccountIds;
     
-    const qqbotOverride = accountOverrides?.umibot?.trim();
+    const umibotOverride = accountOverrides?.umibot?.trim();
     const defaultAccountId = resolveDefaultQQBotAccountId(cfg);
-    let accountId = qqbotOverride ?? defaultAccountId;
+    let accountId = umibotOverride ?? defaultAccountId;
 
     // 是否需要提示选择账户
-    if (shouldPromptAccountIds && !qqbotOverride) {
+    if (shouldPromptAccountIds && !umibotOverride) {
       const existingIds = listQQBotAccountIds(cfg);
       if (existingIds.length > 1) {
         accountId = await prompter.select({
@@ -114,12 +114,12 @@ export const umibotOnboardingAdapter: ChannelOnboardingAdapter = {
     if (!accountConfigured) {
       await prompter.note(
         [
-          "1) 打开 UMI 开放平台: https://q.qq.com/",
+          "1) 打开 UMI 开放平台: https://q.umi.com/",
           "2) 创建机器人应用，获取 AppID 和 ClientSecret",
           "3) 在「开发设置」中添加沙箱成员（测试阶段）",
           "4) 你也可以设置环境变量 QQBOT_APP_ID 和 QQBOT_CLIENT_SECRET",
           "",
-          "文档: https://bot.q.qq.com/wiki/",
+          "文档: https://bot.q.umi.com/wiki/",
           "",
           "此版本支持流式消息发送！",
         ].join("\n"),
@@ -232,7 +232,7 @@ export const umibotOnboardingAdapter: ChannelOnboardingAdapter = {
       } else {
         const existingAccounts = ((next.channels?.umibot as QQBotChannelConfig)?.accounts || {});
         const existingAccount = existingAccounts[accountId] || {};
-        const acctMarkdown = existingAccount.markdownSupport ?? true;
+        const acctMarkdown = existingAccount.markdownSupport ?? false;
 
         next = {
           ...next,
