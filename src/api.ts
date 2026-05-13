@@ -6,15 +6,45 @@
 import os from "node:os";
 import { computeFileHash, getCachedFileInfo, setCachedFileInfo } from "./utils/upload-cache.js";
 import { sanitizeFileName } from "./utils/platform.js";
+import type { InlineKeyboard } from "./types.js";
+
+// ============ 模块级 Logger ============
+
+/** API 模块的日志接口，与 GatewayContext.log 对齐 */
+export interface ApiLogger {
+  info: (msg: string) => void;
+  error: (msg: string) => void;
+  warn?: (msg: string) => void;
+  debug?: (msg: string) => void;
+}
+
+/** 默认使用 console，外部可通过 setApiLogger 注入框架 log */
+let log: ApiLogger = {
+  info: (msg: string) => console.log(msg),
+  error: (msg: string) => console.error(msg),
+  warn: (msg: string) => console.warn(msg),
+  debug: (msg: string) => console.debug(msg),
+};
+
+/**
+ * 注入自定义 logger（在 gateway 启动时调用，将 api 模块的日志统一接入框架日志系统）
+ */
+export function setApiLogger(logger: ApiLogger): void {
+  log = logger;
+}
 
 // ============ 自定义错误 ============
 
-/** API 请求错误，携带 HTTP status code */
+/** API 请求错误，携带 HTTP status code 和业务错误码 */
 export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
     public readonly path: string,
+    /** 业务错误码（回包中的 code / err_code 字段），不一定存在 */
+    public readonly bizCode?: number,
+    /** 回包中的原始 message 字段（用于向用户展示兜底文案） */
+    public readonly bizMessage?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -24,11 +54,19 @@ export class ApiError extends Error {
 const API_BASE = "https://qyapi.umi6.com";
 
 // ============ Plugin User-Agent ============
-// 格式: QQBotPlugin/{version} (Node/{nodeVersion}; {os})
-// 示例: QQBotPlugin/1.6.0 (Node/22.14.0; darwin)
+// 格式: QQBotPlugin/{version} (Node/{nodeVersion}; {os}; OpenClaw/{openclawVersion})
+// 示例: QQBotPlugin/1.6.0 (Node/22.14.0; darwin; OpenClaw/2026.3.31)
 import { getPackageVersion } from "./utils/pkg-version.js";
 const _pluginVersion = getPackageVersion(import.meta.url);
-export const PLUGIN_USER_AGENT = `QQBotPlugin/${_pluginVersion} (Node/${process.versions.node}; ${os.platform()})`;
+// 初始值为 "unknown"，由 setQQBotRuntime 注入后更新为真实版本
+let _openclawVersion = "unknown";
+/** 由 setQQBotRuntime 调用，将 api.runtime.version 注入到 User-Agent */
+export function setOpenClawVersion(version: string) {
+  if (version) _openclawVersion = version;
+}
+export function getPluginUserAgent() {
+  return `QQBotPlugin/${_pluginVersion} (Node/${process.versions.node}; ${os.platform()}; OpenClaw/${_openclawVersion})`;
+}
 
 // 运行时配置
 let currentMarkdownSupport = false;
@@ -112,7 +150,7 @@ export async function getAccessToken(appId: string, clientSecret: string, umi6Sn
   // Singleflight: 如果当前 appId 已有进行中的 Token 获取请求，复用它
   let fetchPromise = tokenFetchPromises.get(normalizedAppId);
   if (fetchPromise) {
-    console.log(`[umibot-api:${normalizedAppId}] Token fetch in progress, waiting for existing request...`);
+    log.info(`[umibot-api:${normalizedAppId}] Token fetch in progress, waiting for existing request...`);
     return fetchPromise;
   }
 
@@ -139,10 +177,11 @@ async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string)
     throw new Error("getAppToken 失败：umi6Sn 为空。请在 OpenClaw 账号配置里填写与 appId 对应的 umi6Sn（租户路径段）。");
   }
   const requestBody = { app_id: appId, app_secret: clientSecret, umi6_sn: sn };
-  const requestHeaders = { "Content-Type": "application/json" };
+  const requestHeaders = { "Content-Type": "application/json", "User-Agent": getPluginUserAgent() };
   const TOKEN_URL = `${API_BASE}/${sn}/api/lobster.auth/getAppToken`;
+  
   // 打印请求信息（隐藏敏感信息）
-  console.log(`[umibot-api:${appId}] >>> POST ${TOKEN_URL} ${umi6Sn}`);
+  log.info(`[umibot-api:${appId}] >>> POST ${TOKEN_URL} [secret: ${clientSecret.slice(0, 6)}...len=${clientSecret.length}]`);
 
   let response: Response;
   try {
@@ -152,7 +191,7 @@ async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string)
       body: JSON.stringify(requestBody),
     });
   } catch (err) {
-    console.error(`[umibot-api:${appId}] <<< Network error:`, err);
+    log.error(`[umibot-api:${appId}] <<< Network error: ${err}`);
     throw new Error(`Network error getting access_token: ${err instanceof Error ? err.message : String(err)}`);
   }
 
@@ -162,7 +201,7 @@ async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string)
     responseHeaders[key] = value;
   });
   const tokenTraceId = response.headers.get("x-tps-trace-id") ?? "";
-  console.log(`[umibot-api:${appId}] <<< Status: ${response.status} ${response.statusText}${tokenTraceId ? ` | TraceId: ${tokenTraceId}` : ""}`);
+  log.info(`[umibot-api:${appId}] <<< Status: ${response.status} ${response.statusText}${tokenTraceId ? ` | TraceId: ${tokenTraceId}` : ""}`);
 
   type TokenPayload = { access_token?: string; expires_in?: number; domain?: string };
   let rawBody: string;
@@ -179,10 +218,10 @@ async function doFetchToken(appId: string, clientSecret: string, umi6Sn: string)
     rawBody = await response.text();
     // 隐藏 token 值
     const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"');
-    console.log(`[umibot-api:${appId}] <<< Body:`, logBody);
+    log.info(`[umibot-api:${appId}] <<< Body: ${logBody}`);
     parsed = JSON.parse(rawBody) as typeof parsed;
   } catch (err) {
-    console.error(`[umibot-api:${appId}] <<< Parse error:`, err);
+    log.error(`[umibot-api:${appId}] <<< Parse error: ${err}`);
     throw new Error(`Failed to parse access_token response: ${err instanceof Error ? err.message : String(err)}`);
   }
 
@@ -227,10 +266,10 @@ export function clearTokenCache(appId?: string): void {
   if (appId) {
     const normalizedAppId = String(appId).trim();
     tokenCacheMap.delete(normalizedAppId);
-    console.log(`[umibot-api:${normalizedAppId}] Token cache cleared manually.`);
+    log.info(`[umibot-api:${normalizedAppId}] Token cache cleared manually.`);
   } else {
     tokenCacheMap.clear();
-    console.log(`[umibot-api] All token caches cleared.`);
+    log.info(`[umibot-api] All token caches cleared.`);
   }
 }
 
@@ -291,10 +330,11 @@ export async function apiRequest<T = unknown>(
   timeoutMs?: number
 ): Promise<T> {
   const url = `${API_BASE}${path}`;
+  const reqTs = Date.now(); // 毫秒时间戳，用于关联同一次请求的所有日志
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
-    "User-Agent": PLUGIN_USER_AGENT,
+    "User-Agent": getPluginUserAgent(),
   };
   
   const isFileUpload = path.includes("/files");
@@ -316,13 +356,13 @@ export async function apiRequest<T = unknown>(
   }
 
   // 打印请求信息
-  console.log(`[umibot-api] >>> ${method} ${url} (timeout: ${timeout}ms)`);
+  log.info(`[umibot-api][${reqTs}] >>> ${method} ${url} (timeout: ${timeout}ms)`);
   if (body) {
     const logBody = { ...body } as Record<string, unknown>;
     if (typeof logBody.file_data === "string") {
       logBody.file_data = `<base64 ${(logBody.file_data as string).length} chars>`;
     }
-    console.log(`[umibot-api] >>> Body:`, JSON.stringify(logBody));
+    log.info(`[umibot-api][${reqTs}] >>> Body: ${JSON.stringify(logBody)}`);
   }
 
   let res: Response;
@@ -331,10 +371,10 @@ export async function apiRequest<T = unknown>(
   } catch (err) {
     clearTimeout(timeoutId);
     if (err instanceof Error && err.name === "AbortError") {
-      console.error(`[umibot-api] <<< Request timeout after ${timeout}ms`);
+      log.error(`[umibot-api][${reqTs}] <<< Request timeout after ${timeout}ms`);
       throw new Error(`Request timeout[${path}]: exceeded ${timeout}ms`);
     }
-    console.error(`[umibot-api] <<< Network error:`, err);
+    log.error(`[umibot-api][${reqTs}] <<< Network error: ${err}`);
     throw new Error(`Network error [${path}]: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     clearTimeout(timeoutId);
@@ -345,7 +385,7 @@ export async function apiRequest<T = unknown>(
     responseHeaders[key] = value;
   });
   const traceId = res.headers.get("x-tps-trace-id") ?? "";
-  console.log(`[umibot-api] <<< Status: ${res.status} ${res.statusText}${traceId ? ` | TraceId: ${traceId}` : ""}`);
+  log.info(`[umibot-api][${reqTs}] <<< Status: ${res.status} ${res.statusText}${traceId ? ` | TraceId: ${traceId}` : ""}`);
 
   let rawBody: string;
   console.log(`[umibot-api] <<< Body: ${JSON.stringify(res)}`);
@@ -354,7 +394,7 @@ export async function apiRequest<T = unknown>(
   } catch (err) {
     throw new Error(`读取响应失败[${path}]: ${err instanceof Error ? err.message : String(err)}`);
   }
-  console.log(`[umibot-api] <<< Body:`, rawBody);
+  log.info(`[umibot-api][${reqTs}] <<< Body: ${rawBody}`);
 
   // 检测非 JSON 响应（HTML 网关错误页 / CDN 限流页等）
   const contentType = res.headers.get("content-type") ?? "";
@@ -372,8 +412,9 @@ export async function apiRequest<T = unknown>(
     }
     // JSON 错误响应
     try {
-      const error = JSON.parse(rawBody) as { message?: string; code?: number };
-      throw new ApiError(`API Error [${path}]: ${error.message ?? rawBody}`, res.status, path);
+      const error = JSON.parse(rawBody) as { message?: string; code?: number; err_code?: number };
+      const bizCode = error.code ?? error.err_code;
+      throw new ApiError(`API Error [${path}]: ${error.message ?? rawBody}`, res.status, path, bizCode, error.message);
     } catch (parseErr) {
       if (parseErr instanceof ApiError) throw parseErr;
       throw new ApiError(`API Error [${path}] HTTP ${res.status}: ${rawBody.slice(0, 200)}`, res.status, path);
@@ -382,13 +423,13 @@ export async function apiRequest<T = unknown>(
 
   // 成功响应但不是 JSON（极端异常情况）
   if (isHtmlResponse) {
-    throw new Error(`UMI 服务端返回了非 JSON 响应（${path}），可能是临时故障，请稍后重试`);
+    throw new ApiError(`QQ 服务端返回了非 JSON 响应（${path}），可能是临时故障，请稍后重试`, res.status, path);
   }
 
   try {
     return JSON.parse(rawBody) as T;
   } catch {
-    throw new Error(`开放平台响应格式异常（${path}），请稍后重试`);
+    throw new ApiError(`开放平台响应格式异常（${path}），请稍后重试`, res.status, path);
   }
 }
 
@@ -422,7 +463,7 @@ async function apiRequestWithRetry<T = unknown>(
 
       if (attempt < maxRetries) {
         const delay = UPLOAD_BASE_DELAY_MS * Math.pow(2, attempt);
-        console.log(`[umibot-api] Upload attempt ${attempt + 1} failed, retrying in ${delay}ms: ${errMsg.slice(0, 100)}`);
+        log.info(`[umibot-api] Upload attempt ${attempt + 1} failed, retrying in ${delay}ms: ${errMsg.slice(0, 100)}`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -456,7 +497,7 @@ async function completeUploadWithRetry(
 
       if (attempt < COMPLETE_UPLOAD_MAX_RETRIES) {
         const delay = COMPLETE_UPLOAD_BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[umibot-api] CompleteUpload attempt ${attempt + 1} failed, retrying in ${delay}ms: ${lastError.message.slice(0, 200)}`);
+        (log.warn ?? log.error)(`[umibot-api] CompleteUpload attempt ${attempt + 1} failed, retrying in ${delay}ms: ${lastError.message.slice(0, 200)}`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -465,16 +506,62 @@ async function completeUploadWithRetry(
   throw lastError!;
 }
 
-// ============ 分片完成重试（无条件，与 completeUpload 策略一致） ============
+// ============ 分片完成重试 ============
 
+/** 普通错误最大重试次数 */
 const PART_FINISH_MAX_RETRIES = 2;
 const PART_FINISH_BASE_DELAY_MS = 1000;
 
+/**
+ * 需要持续重试的业务错误码集合
+ * 当 upload_part_finish 返回这些错误码时，会以固定 1s 间隔持续重试直到成功或超时
+ */
+export const PART_FINISH_RETRYABLE_CODES: Set<number> = new Set([
+  40093001,
+]);
+
+/**
+ * upload_prepare 接口命中此错误码时，携带文件信息抛出 UploadDailyLimitExceededError，
+ * 由上层（outbound.ts）构造包含文件路径和大小的兜底文案发送给用户，
+ * 而非走通用的"文件发送失败，请稍后重试"
+ */
+export const UPLOAD_PREPARE_FALLBACK_CODE = 40093002;
+
+/** 特定错误码持续重试的默认超时（服务端未返回 retry_timeout 时的兜底） */
+const PART_FINISH_RETRYABLE_DEFAULT_TIMEOUT_MS = 2 * 60 * 1000;
+
+/** 特定错误码重试的固定间隔（1 秒） */
+const PART_FINISH_RETRYABLE_INTERVAL_MS = 1000;
+
+/**
+ * 判断错误是否命中"需要持续重试"的业务错误码
+ */
+function isRetryableBizCode(err: unknown): boolean {
+  if (PART_FINISH_RETRYABLE_CODES.size === 0) return false;
+  if (err instanceof ApiError && err.bizCode !== undefined) {
+    return PART_FINISH_RETRYABLE_CODES.has(err.bizCode);
+  }
+  return false;
+}
+
+/**
+ * 分片完成接口重试策略：
+ * 
+ * 1. 命中 PART_FINISH_RETRYABLE_CODES 的错误码 → 每 1s 重试一次，直到成功或超时
+ *    超时时间 = min(API 返回的 retry_timeout, 10 分钟)
+ * 2. 其他错误 → 最多重试 PART_FINISH_MAX_RETRIES 次（与之前逻辑一致）
+ * 
+ * 若持续重试超时或普通重试耗尽，抛出错误，调用方（chunkedUpload）
+ * 可据此中止后续分片上传。
+ * 
+ * @param retryTimeoutMs - 持续重试的超时时间（毫秒），由 upload_prepare 返回的 retry_timeout 计算得出
+ */
 async function partFinishWithRetry(
   accessToken: string,
   method: string,
   path: string,
   body?: unknown,
+  retryTimeoutMs?: number,
 ): Promise<void> {
   let lastError: Error | null = null;
 
@@ -485,9 +572,17 @@ async function partFinishWithRetry(
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
 
+      // 命中特定错误码 → 进入持续重试模式
+      if (isRetryableBizCode(err)) {
+        const timeoutMs = retryTimeoutMs ?? PART_FINISH_RETRYABLE_DEFAULT_TIMEOUT_MS;
+        (log.warn ?? log.error)(`[umibot-api] PartFinish hit retryable bizCode=${(err as ApiError).bizCode}, entering persistent retry (timeout=${timeoutMs / 1000}s, interval=1s)...`);
+        await partFinishPersistentRetry(accessToken, method, path, body, timeoutMs);
+        return;
+      }
+
       if (attempt < PART_FINISH_MAX_RETRIES) {
         const delay = PART_FINISH_BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[umibot-api] PartFinish attempt ${attempt + 1} failed, retrying in ${delay}ms: ${lastError.message.slice(0, 200)}`);
+        (log.warn ?? log.error)(`[umibot-api] PartFinish attempt ${attempt + 1} failed, retrying in ${delay}ms: ${lastError.message.slice(0, 200)}`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -501,6 +596,70 @@ export async function getGatewayUrl(appId: string, appSecret: string): Promise<s
   // console.log(`[umibot-api] getGatewayUrl: got url=${data?.url ?? "(empty)"}`);
   // return `wss://testaest-v1.umi6.com/ws/lobster?app_id=${appId}&app_secret=${appSecret}&source=claw`;
   return `wss://qyapi.umi6.com/ws/lobster?app_id=${appId}&app_secret=${appSecret}&source=claw`;
+}
+/**
+ * 特定错误码的持续重试模式
+ * 不限次数，仅受总超时时间约束，固定每 1 秒重试一次
+ */
+async function partFinishPersistentRetry(
+  accessToken: string,
+  method: string,
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  let lastError: Error | null = null;
+
+  while (Date.now() < deadline) {
+    try {
+      await apiRequest<Record<string, unknown>>(accessToken, method, path, body);
+      log.info(`[umibot-api] PartFinish persistent retry succeeded after ${attempt} retries`);
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      // 如果不再是可重试的错误码，直接抛出（可能是其他类型的错误）
+      if (!isRetryableBizCode(err)) {
+        log.error(`[umibot-api] PartFinish persistent retry: error is no longer retryable (bizCode=${(err as ApiError).bizCode ?? "N/A"}), aborting`);
+        throw lastError;
+      }
+
+      attempt++;
+      const remaining = deadline - Date.now();
+
+      if (remaining <= 0) break;
+
+      const actualDelay = Math.min(PART_FINISH_RETRYABLE_INTERVAL_MS, remaining);
+      (log.warn ?? log.error)(`[umibot-api] PartFinish persistent retry #${attempt}: bizCode=${(err as ApiError).bizCode}, retrying in ${actualDelay}ms (remaining=${Math.round(remaining / 1000)}s)`);
+      await new Promise(resolve => setTimeout(resolve, actualDelay));
+    }
+  }
+
+  // 超时
+  log.error(`[umibot-api] PartFinish persistent retry timed out after ${timeoutMs / 1000}s (${attempt} attempts)`);
+  throw new Error(`upload_part_finish 持续重试超时（${timeoutMs / 1000}s, ${attempt} 次重试），中止上传`);
+}
+
+// export async function getGatewayUrl(accessToken: string): Promise<string> {
+//   const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway");
+//   return data.url;
+// }
+
+/** 回应按钮交互（INTERACTION_CREATE），避免客户端按钮持续 loading */
+export async function acknowledgeInteraction(
+  accessToken: string,
+  interactionId: string,
+  code: 0 | 1 | 2 | 3 | 4 | 5 = 0,
+  data?: Record<string, unknown>
+): Promise<void> {
+  await apiRequest(accessToken, "PUT", `/interactions/${interactionId}`, { code, ...(data ? { data } : {}) });
+}
+
+/** 获取插件版本号（从 package.json 读取，和 getPluginUserAgent() 同源） */
+export function getApiPluginVersion(): string {
+  return _pluginVersion;
 }
 
 // ============ 消息发送接口 ============
@@ -530,7 +689,7 @@ async function sendAndNotify(
     try {
       onMessageSentHook(result.ext_info.ref_idx, meta);
     } catch (err) {
-      console.error(`[umibot-api] onMessageSent hook error: ${err}`);
+      log.error(`[umibot-api] onMessageSent hook error: ${err}`);
     }
   }
   return result;
@@ -543,7 +702,8 @@ function buildMessageBody(
   msgSeq: number,
   openid?: string,
   room_id?: string,
-  messageReference?: string
+  messageReference?: string,
+  inlineKeyboard?: import("./types.js").InlineKeyboard
 ): Record<string, unknown> {
   const body: Record<string, unknown> = currentMarkdownSupport
     ? {
@@ -570,6 +730,10 @@ function buildMessageBody(
   if (messageReference && !currentMarkdownSupport) {
     body.message_reference = { message_id: messageReference };
   }
+  // Inline Keyboard（内嵌按钮，需审核）：字段名 keyboard，结构 { content: { rows } }
+  if (inlineKeyboard) {
+    body.keyboard = inlineKeyboard;
+  }
   return body;
 }
 
@@ -585,6 +749,34 @@ export async function sendC2CMessage(
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
   const body = buildMessageBody(accessToken, content, msgId, msgSeq, openid, room_id, messageReference);
   return sendAndNotify(accessToken, "POST", `/${umi6Sn}/api/lobster.Content/create`, body, { text: content });
+}
+
+/** C2C 发送带 Inline Keyboard 的消息（审批等场景） */
+export async function sendC2CMessageWithInlineKeyboard(
+  accessToken: string,
+  openid: string,
+  content: string,
+  umi6Sn: string,
+  keyboard: InlineKeyboard,
+  msgId?: string,
+  room_id?: string,
+): Promise<MessageResponse> {
+  const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
+  const body = buildMessageBody(accessToken, content, msgId, msgSeq, openid, room_id, undefined, keyboard);
+  return sendAndNotify(accessToken, "POST", `/${umi6Sn}/api/lobster.Content/create`, body, { text: content });
+}
+
+/** 群聊发送带 Inline Keyboard 的消息 */
+export async function sendGroupMessageWithInlineKeyboard(
+  accessToken: string,
+  groupOpenid: string,
+  content: string,
+  keyboard: InlineKeyboard,
+  msgId?: string,
+): Promise<MessageResponse> {
+  const msgSeq = msgId ? getNextMsgSeq(msgId) : 1;
+  const body = buildMessageBody(accessToken, content, msgId, msgSeq, groupOpenid, undefined, undefined, keyboard);
+  return sendAndNotify(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body, { text: content });
 }
 
 export async function sendC2CInputNotify(
@@ -719,6 +911,10 @@ export interface UploadPrepareResponse {
   block_size: number;
   /** 分片列表（含预签名链接） */
   parts: UploadPart[];
+  /** 上传并发数（由服务端控制，可选，不返回时使用客户端默认值） */
+  concurrency?: number;
+  /** upload_part_finish 特定错误码的重试超时时间（秒），由服务端控制，客户端上限 10 分钟 */
+  retry_timeout?: number;
 }
 
 /** 完成文件上传响应（与 UploadMediaResponse 一致） */
@@ -785,10 +981,12 @@ export async function c2cUploadPartFinish(
   partIndex: number,
   blockSize: number,
   md5: string,
+  retryTimeoutMs?: number,
 ): Promise<void> {
   await partFinishWithRetry(
     accessToken, "POST", `/v2/users/${userId}/upload_part_finish`,
     { upload_id: uploadId, part_index: partIndex, block_size: blockSize, md5 },
+    retryTimeoutMs,
   );
 }
 
@@ -841,10 +1039,12 @@ export async function groupUploadPartFinish(
   partIndex: number,
   blockSize: number,
   md5: string,
+  retryTimeoutMs?: number,
 ): Promise<void> {
   await partFinishWithRetry(
     accessToken, "POST", `/v2/groups/${groupId}/upload_part_finish`,
     { upload_id: uploadId, part_index: partIndex, block_size: blockSize, md5 },
+    retryTimeoutMs,
   );
 }
 
@@ -1061,7 +1261,7 @@ export function startBackgroundTokenRefresh(
   options?: BackgroundTokenRefreshOptions
 ): void {
   if (backgroundRefreshControllers.has(appId)) {
-    console.log(`[umibot-api:${appId}] Background token refresh already running`);
+    log.info(`[umibot-api:${appId}] Background token refresh already running`);
     return;
   }
 
@@ -1070,7 +1270,7 @@ export function startBackgroundTokenRefresh(
     randomOffsetMs = 30 * 1000, 
     minRefreshIntervalMs = 60 * 1000, 
     retryDelayMs = 5 * 1000, 
-    log,
+    log: refreshLog,
   } = options ?? {};
 
   const controller = new AbortController();
@@ -1078,7 +1278,7 @@ export function startBackgroundTokenRefresh(
   const signal = controller.signal;
 
   const refreshLoop = async () => {
-    log?.info?.(`[umibot-api:${appId}] Background token refresh started`);
+    refreshLog?.info?.(`[umibot-api:${appId}] Background token refresh started`);
 
     while (!signal.aborted) {
       try {
@@ -1093,26 +1293,26 @@ export function startBackgroundTokenRefresh(
             minRefreshIntervalMs
           );
 
-          log?.debug?.(`[umibot-api:${appId}] Token valid, next refresh in ${Math.round(refreshIn / 1000)}s`);
+          refreshLog?.debug?.(`[umibot-api:${appId}] Token valid, next refresh in ${Math.round(refreshIn / 1000)}s`);
           await sleep(refreshIn, signal);
         } else {
-          log?.debug?.(`[umibot-api:${appId}] No cached token, retrying soon`);
+          refreshLog?.debug?.(`[umibot-api:${appId}] No cached token, retrying soon`);
           await sleep(minRefreshIntervalMs, signal);
         }
       } catch (err) {
         if (signal.aborted) break;
-        log?.error?.(`[umibot-api:${appId}] Background token refresh failed: ${err}`);
+        refreshLog?.error?.(`[umibot-api:${appId}] Background token refresh failed: ${err}`);
         await sleep(retryDelayMs, signal);
       }
     }
 
     backgroundRefreshControllers.delete(appId);
-    log?.info?.(`[umibot-api:${appId}] Background token refresh stopped`);
+    refreshLog?.info?.(`[umibot-api:${appId}] Background token refresh stopped`);
   };
 
   refreshLoop().catch((err) => {
     backgroundRefreshControllers.delete(appId);
-    log?.error?.(`[umibot-api:${appId}] Background token refresh crashed: ${err}`);
+    refreshLog?.error?.(`[umibot-api:${appId}] Background token refresh crashed: ${err}`);
   });
 }
 
@@ -1160,7 +1360,8 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 // ============ 流式消息 API ============
 
-import type { StreamMessageRequest, StreamMessageResponse } from "./types.js";
+import type { StreamMessageRequest } from "./types.js";
+import { StreamInputState } from "./types.js";
 
 /**
  * 发送流式消息（C2C 私聊）
@@ -1170,16 +1371,19 @@ import type { StreamMessageRequest, StreamMessageResponse } from "./types.js";
  * - 后续分片携带 stream_msg_id 和递增 msg_seq
  * - input_state="1" 表示生成中，"10" 表示生成结束（终结状态）
  * 
+ * 仅在终结分片（input_state=DONE）时触发 refIdx 回调，
+ * 中间分片直接调用 apiRequest，避免存入过多无效的中间态数据。
+ * 
  * @param accessToken - access_token
  * @param openid - 用户 openid
  * @param req - 流式消息请求体
- * @returns 流式消息响应
+ * @returns 消息响应（复用 MessageResponse，错误会直接抛出异常）
  */
 export async function sendC2CStreamMessage(
   accessToken: string,
   openid: string,
   req: StreamMessageRequest,
-): Promise<StreamMessageResponse> {
+): Promise<MessageResponse> {
   const path = `/v2/users/${openid}/stream_messages`;
   const body: Record<string, unknown> = {
     input_mode: req.input_mode,
@@ -1194,5 +1398,5 @@ export async function sendC2CStreamMessage(
   if (req.stream_msg_id) {
     body.stream_msg_id = req.stream_msg_id;
   }
-  return apiRequest<StreamMessageResponse>(accessToken, "POST", path, body);
+  return apiRequest<MessageResponse>(accessToken, "POST", path, body);
 }

@@ -21,14 +21,14 @@ import { getHomeDir, getQQBotDataDir, isWindows } from "./utils/platform.js";
 import { saveCredentialBackup } from "./credential-backup.js";
 import { fileURLToPath } from "node:url";
 import { getPackageVersion } from "./utils/pkg-version.js";
+import { getQQBotRuntime } from "./runtime.js";
+import { isApprovalFeatureAvailable } from "./approval-handler.js";
 const require = createRequire(import.meta.url);
 
 let PLUGIN_VERSION = getPackageVersion(import.meta.url);
 
-// 获取 openclaw 框架版本（缓存结果，只执行一次）
-let _frameworkVersion: string | null = null;
-function getFrameworkVersion(): string {
-  if (_frameworkVersion !== null) return _frameworkVersion;
+// 获取 openclaw 框架版本（不缓存，每次实时获取）
+export function getFrameworkVersion(): string {
   try {
     // 先尝试 PATH 中的 CLI
     // Windows 上 npm 安装的 CLI 通常是 .cmd wrapper，execFileSync 需要 shell:true 才能执行
@@ -40,8 +40,7 @@ function getFrameworkVersion(): string {
         }).trim();
         // 输出格式: "OpenClaw 2026.3.13 (61d171a)"
         if (out) {
-          _frameworkVersion = out;
-          return _frameworkVersion;
+          return out;
         }
       } catch {
         continue;
@@ -52,15 +51,13 @@ function getFrameworkVersion(): string {
     if (cliPath) {
       const out = execCliSync(cliPath, ["--version"]);
       if (out) {
-        _frameworkVersion = out;
-        return _frameworkVersion;
+        return out;
       }
     }
   } catch {
     // fallback
   }
-  _frameworkVersion = "unknown";
-  return _frameworkVersion;
+  return "unknown";
 }
 
 // ============ 热更新兼容性检查 ============
@@ -90,7 +87,7 @@ interface UpgradeCompatResult {
  * 解析框架版本字符串中的日期版本号
  * 输入示例: "OpenClaw 2026.3.13 (61d171a)" → "2026.3.13"
  */
-function parseFrameworkDateVersion(versionStr: string): string | null {
+export function parseFrameworkDateVersion(versionStr: string): string | null {
   const m = versionStr.match(/(\d{4}\.\d{1,2}\.\d{1,2})/);
   return m ? m[1] : null;
 }
@@ -222,14 +219,20 @@ export interface QueueSnapshot {
   senderPending: number;
 }
 
-/** 斜杠指令返回值：文本、带文件的结果、或 null（不处理） */
-export type SlashCommandResult = string | SlashCommandFileResult | null;
+/** 斜杠指令返回值：文本、带文件的结果、委托给模型、或 null（不处理） */
+export type SlashCommandResult = string | SlashCommandFileResult | SlashCommandDelegateResult | null;
 
 /** 带文件的指令结果（先回复文本，再发送文件） */
 export interface SlashCommandFileResult {
   text: string;
   /** 要发送的本地文件路径 */
   filePath: string;
+}
+
+/** 委托给 AI 模型处理：用加工后的 prompt 替换原始消息入队 */
+export interface SlashCommandDelegateResult {
+  /** 替换原始消息内容的 prompt，交给 AI 模型执行 */
+  delegatePrompt: string;
 }
 
 /** 斜杠指令定义 */
@@ -748,14 +751,22 @@ function cleanupTempScript(): void {
  *
  * 安全机制：脚本会被复制到临时目录再执行，避免升级过程中插件目录被操作导致脚本自身丢失。
  */
-function fireHotUpgrade(targetVersion?: string): HotUpgradeStartResult {
-  // 优先从远端下载升级脚本，避免使用本地可能过时的版本
-  const scriptPath = downloadRemoteUpgradeScript() || (() => {
-    const local = getUpgradeScriptPath();
-    if (!local) return null;
-    console.log(`[umibot] fireHotUpgrade: remote download failed, falling back to local script: ${local}`);
-    return copyScriptToTemp(local) || local;
-  })();
+function fireHotUpgrade(targetVersion?: string, pkg?: string, useLocal?: boolean): HotUpgradeStartResult {
+  // --local: 直接使用本地脚本，跳过远端下载
+  // 默认: 优先从远端下载升级脚本，避免使用本地可能过时的版本
+  const scriptPath = useLocal
+    ? (() => {
+      const local = getUpgradeScriptPath();
+      if (!local) return null;
+      console.log(`[umibot] fireHotUpgrade: --local specified, using local script: ${local}`);
+      return copyScriptToTemp(local) || local;
+    })()
+    : downloadRemoteUpgradeScript() || (() => {
+      const local = getUpgradeScriptPath();
+      if (!local) return null;
+      console.log(`[umibot] fireHotUpgrade: remote download failed, falling back to local script: ${local}`);
+      return copyScriptToTemp(local) || local;
+    })();
   if (!scriptPath) return { ok: false, reason: "no-script" };
 
   const cli = findCli();
@@ -774,27 +785,149 @@ function fireHotUpgrade(targetVersion?: string): HotUpgradeStartResult {
       "-File", scriptPath,
       "-NoRestart",
       ...(targetVersion ? ["-Version", targetVersion] : []),
+      ...(pkg ? ["-Pkg", pkg] : []),
     ];
   } else {
     // Mac / Linux: bash 执行 .sh
     const bash = findBash();
     if (!bash) return { ok: false, reason: "no-bash" };
     shell = bash;
-    shellArgs = [scriptPath, "--no-restart", ...(targetVersion ? ["--version", targetVersion] : [])];
+    shellArgs = [scriptPath, "--no-restart", ...(targetVersion ? ["--version", targetVersion] : []), ...(pkg ? ["--pkg", pkg] : [])];
   }
 
-  console.log(`[umibot] fireHotUpgrade: shell=${shell}, script=${scriptPath}, cli=${cli}, target=${targetVersion || "latest"}`);
+  console.log(`[umibot] fireHotUpgrade: shell=${shell}, script=${scriptPath}, cli=${cli}, target=${targetVersion || "latest"}, pkg=${pkg || "default"}`);
+
+  // ── 兼容 openclaw 3.23+ 配置严格校验 ──
+  // openclaw plugins install/update 启动时会校验整个配置文件，
+  // 如果 channels.umibot 已存在但 umibot 插件尚未加载，校验会报 "unknown channel id: umibot"。
+  //
+  // ⚠️ 关键：绝不能直接修改真实的 openclaw.json！
+  //    gateway 的 config file watcher 会检测到变更并触发 SIGUSR1 重启，
+  //    导致当前进程被杀、execFile 回调（restoreConfigAndCleanup）永远不会执行，
+  //    channels.umibot 配置就此丢失。
+  //
+  // 策略：创建临时配置副本（不含 channels.qqbot），通过 OPENCLAW_CONFIG_PATH
+  //       环境变量传递给子进程，真实配置文件不受影响。
+  //       shell 脚本（upgrade-via-npm.sh）内部也有同样的临时配置机制作为双保险。
+  const homeDir = getHomeDir();
+  const realConfigPath = path.join(homeDir, ".openclaw", "openclaw.json");
+  let tempConfigPath: string | null = null;
+  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+
+  try {
+    if (fs.existsSync(realConfigPath)) {
+      const cfg = JSON.parse(fs.readFileSync(realConfigPath, "utf8"));
+      const needsTempConfig =
+        !!(cfg.channels?.umibot) ||
+        !!(cfg.plugins?.entries?.["openclaw-umibot"]);
+
+      if (needsTempConfig) {
+        // 创建临时配置副本（移除 channels.umibot 和 plugins.entries.openclaw-qqbot）
+        const cleanCfg = JSON.parse(JSON.stringify(cfg)); // deep clone
+        if (cleanCfg.channels?.umibot) {
+          delete cleanCfg.channels.umibot;
+          if (Object.keys(cleanCfg.channels).length === 0) delete cleanCfg.channels;
+        }
+        if (cleanCfg.plugins?.entries?.["openclaw-umibot"]) {
+          delete cleanCfg.plugins.entries["openclaw-umibot"];
+          if (cleanCfg.plugins.entries && Object.keys(cleanCfg.plugins.entries).length === 0) delete cleanCfg.plugins.entries;
+        }
+
+        const tmpDir = path.join(homeDir, ".openclaw", ".umibot-upgrade-tmp");
+        fs.mkdirSync(tmpDir, { recursive: true });
+        tempConfigPath = path.join(tmpDir, "openclaw-tmp.json");
+        fs.writeFileSync(tempConfigPath, JSON.stringify(cleanCfg, null, 4) + "\n");
+        childEnv.OPENCLAW_CONFIG_PATH = tempConfigPath;
+        console.log(`[umibot] fireHotUpgrade: created temp config without channels.umibot (OPENCLAW_CONFIG_PATH=${tempConfigPath}), real config untouched`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[umibot] fireHotUpgrade: failed to create temp config: ${e.message}, proceeding with original`);
+    tempConfigPath = null;
+  }
+
+  /**
+   * 将 openclaw plugins install 写入临时配置的 installs/entries 记录同步回真实配置，
+   * 然后清理临时文件。
+   *
+   * 注意：真实配置中的 channels.umibot 从未被移除，无需恢复。
+   */
+  function syncTempConfigAndCleanup(): void {
+    try {
+      if (tempConfigPath && fs.existsSync(tempConfigPath) && fs.existsSync(realConfigPath)) {
+        const tmp = JSON.parse(fs.readFileSync(tempConfigPath, "utf8"));
+        const real = JSON.parse(fs.readFileSync(realConfigPath, "utf8"));
+        let changed = false;
+
+        // 同步 plugins.installs（openclaw plugins install 会写入安装记录）
+        if (tmp.plugins?.installs) {
+          if (!real.plugins) real.plugins = {};
+          real.plugins.installs = { ...(real.plugins.installs || {}), ...tmp.plugins.installs };
+          changed = true;
+        }
+        // 同步 plugins.entries（openclaw plugins install 会写入 entries）
+        // 注意：不同步 openclaw-umibot 自身的 entry，因为插件通过 auto-discover 加载，
+        // 显式写入 entries 会导致 "duplicate plugin id" 警告刷屏。
+        if (tmp.plugins?.entries) {
+          if (!real.plugins) real.plugins = {};
+          if (!real.plugins.entries) real.plugins.entries = {};
+          for (const [k, v] of Object.entries(tmp.plugins.entries)) {
+            if (k === "openclaw-umibot") continue; // 跳过自身，避免 duplicate
+            if (!real.plugins.entries[k]) {
+              real.plugins.entries[k] = v;
+              changed = true;
+            }
+          }
+        }
+
+        if (changed) {
+          fs.writeFileSync(realConfigPath, JSON.stringify(real, null, 4) + "\n");
+          console.log("[umibot] fireHotUpgrade: synced install/entries records from temp config to real config");
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[umibot] fireHotUpgrade: failed to sync temp config: ${e.message}`);
+    }
+    // 清理临时文件
+    try { if (tempConfigPath) fs.unlinkSync(tempConfigPath); } catch { /* ignore */ }
+  }
 
   // 异步执行升级脚本
-  execFile(shell, shellArgs, {
-    timeout: 120_000,
-    env: { ...process.env },
+  // 必须显式设置 cwd 为一个确定存在的目录（如 homeDir），
+  // 否则子进程继承 gateway 的 cwd，如果该目录在升级过程中被删除/移动，
+  // openclaw CLI 启动时 process.cwd() 会报 ENOENT: uv_cwd 错误。
+  // 超时设为 5 分钟：openclaw plugins install 需要下载 npm 包，
+  // 网络慢时（如国内访问 npm registry）可能需要 2-3 分钟。
+  // 120 秒超时会导致脚本被杀但 openclaw CLI 子进程继续运行，
+  // 同时 bash 的 cleanup_on_exit 回滚了备份目录，造成 "plugin already exists" 错误。
+  const child = execFile(shell, shellArgs, {
+    timeout: 300_000,
+    cwd: homeDir,
+    env: childEnv,
+    killSignal: "SIGTERM",
     ...(isWindows() ? { windowsHide: true } : {}),
   }, (error, stdout, _stderr) => {
     if (error) {
       console.error(`[umibot] fireHotUpgrade: script failed: ${error.message}`);
       if (stdout) console.error(`[umibot] fireHotUpgrade: stdout: ${stdout.slice(0, 2000)}`);
       if (_stderr) console.error(`[umibot] fireHotUpgrade: stderr: ${_stderr.slice(0, 2000)}`);
+
+      // 超时时确保子进程树被清理，防止 openclaw plugins install 继续运行
+      // 与 cleanup_on_exit 的回滚逻辑冲突（回滚恢复了旧目录，install 又尝试写入）
+      if ((error as any).killed || error.message.includes("TIMEOUT")) {
+        try {
+          // 尝试杀掉子进程树（SIGKILL 确保立即终止）
+          child.kill("SIGKILL");
+          // 额外尝试通过 pkill 杀掉可能残留的 openclaw plugins install 子进程
+          if (!isWindows()) {
+            try { execFileSync("pkill", ["-9", "-f", "openclaw.*plugins.*install"], { timeout: 3000, stdio: "pipe" }); } catch { /* ignore */ }
+          }
+        } catch {
+          // 进程可能已退出
+        }
+      }
+
+      syncTempConfigAndCleanup();
       cleanupTempScript();
       _upgrading = false;
       return;
@@ -807,6 +940,7 @@ function fireHotUpgrade(targetVersion?: string): HotUpgradeStartResult {
     const newVersion = versionMatch?.[1];
     if (newVersion === "unknown") {
       console.error(`[umibot] fireHotUpgrade: script output QQBOT_NEW_VERSION=unknown, aborting restart`);
+      syncTempConfigAndCleanup();
       cleanupTempScript();
       _upgrading = false;
       return;
@@ -814,7 +948,8 @@ function fireHotUpgrade(targetVersion?: string): HotUpgradeStartResult {
 
     console.log(`[umibot] fireHotUpgrade: new version=${newVersion || "(not detected)"}, triggering restart...`);
 
-    // 脚本执行成功，清理临时脚本副本
+    // 脚本执行成功，同步临时配置中的 install 记录并清理
+    syncTempConfigAndCleanup();
     cleanupTempScript();
 
     // 文件替换成功，在 restart 之前把 source 从 path 切换为 npm，
@@ -857,17 +992,175 @@ function fireHotUpgrade(targetVersion?: string): HotUpgradeStartResult {
         execCliAsync(cli, ["gateway", "restart"], { timeout: 30_000 }, () => {});
       }
     } else {
-      // Mac/Linux: 直接 restart（框架通常以 daemon 模式运行）
-      execCliAsync(cli, ["gateway", "restart"], { timeout: 30_000 }, (restartErr) => {
-        if (restartErr) {
-          console.error(`[umibot] fireHotUpgrade: restart failed: ${restartErr.message}, trying stop+start fallback`);
-          execCliAsync(cli, ["gateway", "stop"], { timeout: 10_000 }, () => {
-            setTimeout(() => {
-              execCliAsync(cli, ["gateway", "start"], { timeout: 30_000 }, () => {});
-            }, 1000);
-          });
+      // Mac/Linux: 使用 detached shell 脚本执行 stop+start
+      //
+      // 兼容 openclaw 2026.3.24+ 配置严格校验：
+      //   gateway restart 时 openclaw 先校验配置（loadConfig）再加载插件。
+      //   如果 channels.umibot 存在但 umibot channel type 尚未注册，校验会失败。
+      //   解决：stop 后临时移除 channels.umibot → start（插件加载、qqbot type 注册）→ 恢复。
+      const cliInvoke = cli.endsWith(".mjs")
+        ? `"${process.execPath}" "${cli}"`
+        : `"${cli}"`;
+      const homeDir = getHomeDir();
+      const configPath = path.join(homeDir, ".openclaw", "openclaw.json");
+      const qqbotChannelBackup = path.join(homeDir, ".openclaw", ".umibot-channel-backup.json");
+      const restartScript = path.join(homeDir, ".openclaw", ".umibot-restart.sh");
+
+      // 先保存 channels.umibot 到临时文件（在当前进程中，JSON 处理更安全）
+      let hasChannel = false;
+      try {
+        const cfgRaw = fs.readFileSync(configPath, "utf8");
+        const cfg = JSON.parse(cfgRaw);
+        const umibot = cfg?.channels?.umibot;
+        if (umibot) {
+          fs.writeFileSync(qqbotChannelBackup, JSON.stringify(umibot, null, 2), "utf8");
+          hasChannel = true;
         }
-      });
+      } catch {
+        // 配置文件不存在或 JSON 解析失败，不做处理
+      }
+
+      const shContent = `#!/bin/bash
+# 注意：不使用 set -e，因为 gateway start 失败时仍需恢复 channels.umibot
+CLI="${cliInvoke}"
+CONFIG="${configPath}"
+BACKUP="${qqbotChannelBackup}"
+
+# ── 兼容 openclaw 3.23+ 配置严格校验 ──
+# 所有 openclaw CLI 命令（包括 gateway stop/start）启动时都会 loadConfig 校验配置，
+# 如果 channels.umibot 存在但 umibot 插件尚未加载，校验会报 "unknown channel id: umibot"。
+#
+# 策略：
+#   1. gateway stop：使用 OPENCLAW_CONFIG_PATH 临时配置（不含 channels.qqbot）
+#   2. gateway start：先尝试直接启动（真实配置），如果 CLI 校验失败，
+#      则临时修改真实配置（此时 gateway 已停止，无 config watcher），启动后恢复。
+#      这样 gateway 进程读取的是完整配置（含 channels.qqbot）。
+
+# 为 gateway stop 创建临时配置
+TEMP_RESTART_CONFIG=""
+if [ -f "$BACKUP" ]; then
+  TEMP_RESTART_CONFIG="\$(mktemp)"
+  node -e "
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+    if (cfg.channels && cfg.channels.umibot) {
+      delete cfg.channels.umibot;
+      if (Object.keys(cfg.channels).length === 0) delete cfg.channels;
+    }
+    if (cfg.plugins && cfg.plugins.entries && cfg.plugins.entries['openclaw-umibot']) {
+      delete cfg.plugins.entries['openclaw-umibot'];
+      if (Object.keys(cfg.plugins.entries).length === 0) delete cfg.plugins.entries;
+    }
+    fs.writeFileSync(process.argv[2], JSON.stringify(cfg, null, 4) + '\\n');
+  " "$CONFIG" "$TEMP_RESTART_CONFIG" 2>/dev/null
+  if [ \$? -ne 0 ] || [ ! -s "$TEMP_RESTART_CONFIG" ]; then
+    echo "[umibot-upgrade] WARNING: failed to create temp config"
+    TEMP_RESTART_CONFIG=""
+  fi
+fi
+
+echo "[umibot-upgrade] Stopping gateway..."
+if [ -n "$TEMP_RESTART_CONFIG" ]; then
+  OPENCLAW_CONFIG_PATH="$TEMP_RESTART_CONFIG" $CLI gateway stop 2>/dev/null || true
+else
+  $CLI gateway stop 2>/dev/null || true
+fi
+sleep 2
+
+# 清理临时配置（不再需要）
+if [ -n "$TEMP_RESTART_CONFIG" ] && [ -f "$TEMP_RESTART_CONFIG" ]; then
+  rm -f "$TEMP_RESTART_CONFIG"
+fi
+
+echo "[umibot-upgrade] Starting gateway..."
+START_OK=false
+
+# 先尝试直接启动（使用真实配置，含 channels.qqbot）
+# 如果 openclaw 版本不做严格校验，或者插件已注册，这会直接成功
+if $CLI gateway start 2>/dev/null; then
+  START_OK=true
+  echo "[umibot-upgrade] Gateway started successfully (direct start)"
+elif [ -f "$BACKUP" ]; then
+  # 直接启动失败（可能是 channels.umibot 校验失败），
+  # 临时修改真实配置（此时 gateway 已停止，无 config watcher，安全）
+  echo "[umibot-upgrade] Direct start failed, temporarily removing channels.umibot from real config..."
+  node -e "
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+    let changed = false;
+    if (cfg.channels && cfg.channels.umibot) {
+      delete cfg.channels.umibot;
+      if (Object.keys(cfg.channels).length === 0) delete cfg.channels;
+      changed = true;
+    }
+    if (cfg.plugins && cfg.plugins.entries && cfg.plugins.entries['openclaw-umibot']) {
+      delete cfg.plugins.entries['openclaw-umibot'];
+      if (Object.keys(cfg.plugins.entries).length === 0) delete cfg.plugins.entries;
+      changed = true;
+    }
+    if (changed) {
+      fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 4) + '\\n');
+    }
+  " "$CONFIG" 2>/dev/null
+
+  if $CLI gateway start 2>/dev/null; then
+    START_OK=true
+    echo "[umibot-upgrade] Gateway started successfully (after config fix)"
+  else
+    echo "[umibot-upgrade] WARNING: gateway start still failed after config fix"
+  fi
+
+  # 等待 gateway 进程启动并加载插件（插件注册 umibot channel type）
+  echo "[umibot-upgrade] Waiting for plugin to load (8s)..."
+  sleep 8
+
+  # 恢复 channels.umibot 到真实配置
+  # gateway 的 config file watcher 会检测到变更并热加载
+  echo "[umibot-upgrade] Restoring channels.umibot to real config..."
+  node -e "
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+    const umibot = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+    if (!cfg.channels) cfg.channels = {};
+    cfg.channels.umibot = umibot;
+    // 注意：不写入 plugins.entries.openclaw-qqbot，
+    // 插件通过 auto-discover 加载，显式 entry 会导致 duplicate plugin id 警告。
+    fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 4) + '\\n');
+  " "$CONFIG" "$BACKUP" 2>/dev/null
+  rm -f "$BACKUP"
+  echo "[umibot-upgrade] channels.umibot restored"
+else
+  echo "[umibot-upgrade] WARNING: gateway start failed, no backup to restore"
+fi
+
+# 直接启动成功的情况下，清理备份文件
+if [ "$START_OK" = "true" ] && [ -f "$BACKUP" ]; then
+  rm -f "$BACKUP"
+fi
+
+# 如果 start 失败，尝试再次启动
+if [ "$START_OK" != "true" ]; then
+  echo "[umibot-upgrade] Retrying gateway start..."
+  sleep 2
+  $CLI gateway start 2>/dev/null || echo "[umibot-upgrade] WARNING: retry also failed"
+fi
+
+# 清理自身
+rm -f "$0"
+echo "[umibot-upgrade] Done."
+`;
+      try {
+        fs.writeFileSync(restartScript, shContent, { mode: 0o755 });
+        const child = spawn("bash", [restartScript], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+        console.log(`[umibot] fireHotUpgrade: launched detached restart script (pid=${child.pid}), hasChannel=${hasChannel}`);
+      } catch (shErr: any) {
+        console.error(`[umibot] fireHotUpgrade: failed to launch restart script: ${shErr.message}, falling back to direct restart`);
+        execCliAsync(cli, ["gateway", "restart"], { timeout: 30_000 }, () => {});
+      }
     }
   });
 
@@ -896,11 +1189,13 @@ registerCommand({
     `/bot-upgrade              检查是否有新版本`,
     `/bot-upgrade --latest     确认升级到最新版本（需 upgradeMode=hot-reload）`,
     `/bot-upgrade --version X  升级到指定版本（需 upgradeMode=hot-reload）`,
+    `/bot-upgrade --pkg scope/name  指定 npm 包（如 ryantest/openclaw-qqbot）`,
     `/bot-upgrade --force      强制重新安装当前版本（需 upgradeMode=hot-reload）`,
+    `/bot-upgrade --local      使用本地升级脚本（跳过远端下载）`,
   ].join("\n"),
   handler: async (ctx) => {
     const url = ctx.accountConfig?.upgradeUrl || DEFAULT_UPGRADE_URL;
-    const upgradeMode = ctx.accountConfig?.upgradeMode || "doc";
+    const upgradeMode = ctx.accountConfig?.upgradeMode || "hot-reload";
     const args = ctx.args.trim();
     const info = await getUpdateInfo();
 
@@ -951,7 +1246,9 @@ registerCommand({
 
     let isForce = false;
     let isLatest = false;
+    let isLocal = false;
     let versionArg: string | undefined;
+    let pkgArg: string | undefined;
     const tokens = args ? args.split(/\s+/).filter(Boolean) : [];
     for (let i = 0; i < tokens.length; i += 1) {
       const t = tokens[i]!;
@@ -961,6 +1258,27 @@ registerCommand({
       }
       if (t === "--latest") {
         isLatest = true;
+        continue;
+      }
+      if (t === "--local") {
+        isLocal = true;
+        continue;
+      }
+      if (t === "--pkg") {
+        const next = tokens[i + 1];
+        if (!next || next.startsWith("--")) {
+          return `❌ 参数错误：--pkg 需要包名\n\n示例：/bot-upgrade --pkg ryantest/openclaw-umibot`;
+        }
+        pkgArg = next;
+        i += 1;
+        continue;
+      }
+      if (t.startsWith("--pkg=")) {
+        const v = t.slice("--pkg=".length).trim();
+        if (!v) {
+          return `❌ 参数错误：--pkg 需要包名\n\n示例：/bot-upgrade --pkg ryantest/openclaw-umibot`;
+        }
+        pkgArg = v;
         continue;
       }
       if (t === "--version") {
@@ -1024,9 +1342,17 @@ registerCommand({
       ].join("\n");
     }
 
+    // 解析 npm 包名：--pkg 参数 > 配置项 upgradePkg > 默认
+    // 支持 "scope/name"（自动补 @）和 "@scope/name" 两种格式
+    let upgradePkg = pkgArg || ctx.accountConfig?.upgradePkg;
+    if (upgradePkg) {
+      upgradePkg = upgradePkg.trim();
+      if (!upgradePkg.startsWith("@")) upgradePkg = `@${upgradePkg}`;
+    }
+
     // ── --version 指定版本：先校验版本号是否存在 ──
     if (versionArg) {
-      const exists = await checkVersionExists(versionArg);
+      const exists = await checkVersionExists(versionArg, upgradePkg);
       if (!exists) {
         return `❌ 版本 ${versionArg} 不存在，请检查版本号`;
       }
@@ -1079,7 +1405,7 @@ registerCommand({
     preUpgradeCredentialBackup(ctx.accountId, ctx.appId);
 
     // 异步执行升级
-    const startResult = fireHotUpgrade(targetVersion);
+    const startResult = fireHotUpgrade(targetVersion, upgradePkg, isLocal);
     if (!startResult.ok) {
       _upgrading = false;
       if (startResult.reason === "no-script") {
@@ -1428,7 +1754,7 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * /bot-clear-storage — 清理通过 QQBot 对话产生的文件以及下载的资源
+ * /bot-clear-storage — 清理通过 UMIBot 对话产生的文件以及下载的资源
  *
  * 仅在私聊（c2c）中可用。
  * --force 执行时删除整个 appId 目录下的所有文件（不区分用户 openid）。
@@ -1578,6 +1904,362 @@ function removeEmptyDirs(dirPath: string): void {
     // 目录可能正在被使用，跳过
   }
 }
+
+// ============ /bot-streaming ============
+
+/**
+ * /bot-streaming on|off — 一键开关流式消息
+ *
+ * 直接修改当前账户的 streaming 配置项并持久化到 openclaw.json。
+ * 修改后即时生效（下一条消息起按新配置处理）。
+ */
+registerCommand({
+  name: "bot-streaming",
+  description: "一键开关流式消息",
+  usage: [
+    `/bot-streaming on     开启流式消息`,
+    `/bot-streaming off    关闭流式消息`,
+    `/bot-streaming        查看当前流式消息状态`,
+    ``,
+    `开启后，AI 的回复会以流式形式逐步显示（打字机效果）。`,
+    `注意：仅 C2C（私聊）支持流式消息。`,
+  ].join("\n"),
+  handler: async (ctx) => {
+    // 流式消息仅支持 C2C（私聊），群/频道场景直接提示
+    if (ctx.type !== "c2c") {
+      return `❌ 流式消息仅支持私聊场景，请在私聊中使用 /bot-streaming 指令`;
+    }
+
+    const arg = ctx.args.trim().toLowerCase();
+
+    // 读取当前 streaming 状态
+    const currentStreaming = ctx.accountConfig?.streaming === true;
+
+    // 无参数：查看当前状态
+    if (!arg) {
+      return [
+        `📡 流式消息状态：${currentStreaming ? "✅ 已开启" : "❌ 已关闭"}`,
+        ``,
+        `使用 <umibot-cmd-input text="/bot-streaming on" show="/bot-streaming on"/> 开启`,
+        `使用 <umibot-cmd-input text="/bot-streaming off" show="/bot-streaming off"/> 关闭`,
+      ].join("\n");
+    }
+
+    if (arg !== "on" && arg !== "off") {
+      return `❌ 参数错误，请使用 on 或 off\n\n示例：/bot-streaming on`;
+    }
+
+    const newStreaming = arg === "on";
+
+    // 如果状态没变，直接返回
+    if (newStreaming === currentStreaming) {
+      return `📡 流式消息已经是${newStreaming ? "开启" : "关闭"}状态，无需操作`;
+    }
+
+    // 更新配置（参考 handleInteractionCreate 中的配置更新逻辑）
+    try {
+      const runtime = getQQBotRuntime();
+      const configApi = runtime.config as {
+        loadConfig: () => Record<string, unknown>;
+        writeConfigFile: (cfg: unknown) => Promise<void>;
+      };
+
+      const currentCfg = structuredClone(configApi.loadConfig()) as Record<string, unknown>;
+      const umibot = ((currentCfg.channels ?? {}) as Record<string, unknown>).umibot as Record<string, unknown> | undefined;
+
+      if (!umibot) {
+        return `❌ 配置文件中未找到 umibot 通道配置`;
+      }
+
+      const accountId = ctx.accountId;
+      const isNamedAccount = accountId !== "default" && (umibot.accounts as Record<string, Record<string, unknown>> | undefined)?.[accountId];
+
+      if (isNamedAccount) {
+        // 命名账户：更新 accounts.{accountId}.streaming
+        const accounts = umibot.accounts as Record<string, Record<string, unknown>>;
+        const acct = accounts[accountId] ?? {};
+        acct.streaming = newStreaming;
+        accounts[accountId] = acct;
+        umibot.accounts = accounts;
+      } else {
+        // 默认账户：更新 umibot.streaming
+        umibot.streaming = newStreaming;
+      }
+
+      await configApi.writeConfigFile(currentCfg);
+
+      return [
+        `✅ 流式消息已${newStreaming ? "开启" : "关闭"}`,
+        ``,
+        newStreaming
+          ? `AI 的回复将以流式形式逐步显示（仅私聊生效）。`
+          : `AI 的回复将恢复为完整发送。`,
+      ].join("\n");
+    } catch (err) {
+      const fwVer = getFrameworkVersion();
+      return [
+        `❌ 当前版本不支持该指令`,
+        ``,
+        `🦞框架版本：${fwVer}`,
+        `🤖QQBot 插件版本：v${PLUGIN_VERSION}`,
+        ``,
+        `可通过以下命令手动开启流式消息：`,
+        ``,
+        `\`\`\`shell`,
+        `# 1. 开启流式消息`,
+        `openclaw config set channels.umibot.streaming true`,
+        ``,
+        `# 2. 重启网关使配置生效`,
+        `openclaw gateway restart`,
+        `\`\`\``,
+      ].join("\n");
+    }
+  },
+});
+
+// ============ /bot-approve 审批配置管理 ============
+
+/**
+ * /bot-approve — 管理命令执行审批配置
+ *
+ * 修改 openclaw.json 中 tools.exec.security / tools.exec.ask 字段。
+ *
+ * security: deny | allowlist | full
+ * ask: off | on-miss | always
+ */
+registerCommand({
+  name: "bot-approve",
+  description: "管理命令执行审批配置",
+  usage: [
+    `/bot-approve            查看操作指引`,
+    `/bot-approve on         开启审批（白名单模式，推荐）`,
+    `/bot-approve off        关闭审批，命令直接执行`,
+    `/bot-approve always     始终审批，每次执行都需审批`,
+    `/bot-approve reset      恢复框架默认值`,
+    `/bot-approve status     查看当前审批配置`,
+  ].join("\n"),
+  handler: async (ctx) => {
+    const arg = ctx.args.trim().toLowerCase();
+
+    // 审批功能需要 openclaw >= 3.22（gateway-runtime 模块）
+    if (!isApprovalFeatureAvailable()) {
+      return `❌ 当前 OpenClaw 版本不支持审批功能，请升级至最新版本后重试。`;
+    }
+
+    let runtime;
+    try {
+      runtime = getQQBotRuntime();
+    } catch {
+      // runtime 不可用，构造 prompt 委托给 AI 模型通过 CLI 完成
+      const presetMap: Record<string, { security: string; ask: string; desc: string }> = {
+        on: { security: "allowlist", ask: "on-miss", desc: "开启审批（白名单模式）" },
+        off: { security: "full", ask: "off", desc: "关闭审批" },
+        always: { security: "allowlist", ask: "always", desc: "严格模式（每次都审批）" },
+        strict: { security: "allowlist", ask: "always", desc: "严格模式（每次都审批）" },
+      };
+      const preset = presetMap[arg];
+      if (preset) {
+        return {
+          delegatePrompt: [
+            `请帮我${preset.desc}。执行以下单条命令（不要拆开）：`,
+            `openclaw config set tools.exec.security ${preset.security} && openclaw config set tools.exec.ask ${preset.ask}`,
+            `执行完成后告诉用户审批配置已更新为 security=${preset.security}, ask=${preset.ask}。`,
+          ].join("\n"),
+        };
+      }
+      if (arg === "reset") {
+        return {
+          delegatePrompt: [
+            `请帮我重置审批配置。执行以下单条命令（不要拆开）：`,
+            `openclaw config unset tools.exec.security && openclaw config unset tools.exec.ask`,
+            `执行完成后告诉用户审批配置已重置为框架默认值。`,
+          ].join("\n"),
+        };
+      }
+      if (arg === "status") {
+        return {
+          delegatePrompt: [
+            `请帮我查看当前命令执行审批配置。执行以下单条命令（不要拆开）：`,
+            `echo "security=$(openclaw config get tools.exec.security)" && echo "ask=$(openclaw config get tools.exec.ask)"`,
+            `然后告诉用户当前 security 和 ask 的值，以及可用的操作选项：`,
+            `- /bot-approve on    开启审批（白名单模式）`,
+            `- /bot-approve off   关闭审批`,
+            `- /bot-approve always 严格模式`,
+            `- /bot-approve reset 恢复默认`,
+          ].join("\n"),
+        };
+      }
+      // 无参数或未知参数：直接返回操作指引
+      return [
+        `🔐 命令执行审批配置`,
+        ``,
+        `<umibot-cmd-input text="/bot-approve on" show="/bot-approve on"/> 开启审批（白名单模式）`,
+        `<umibot-cmd-input text="/bot-approve off" show="/bot-approve off"/> 关闭审批`,
+        `<umibot-cmd-input text="/bot-approve always" show="/bot-approve always"/> 严格模式`,
+        `<umibot-cmd-input text="/bot-approve reset" show="/bot-approve reset"/> 恢复默认`,
+        `<umibot-cmd-input text="/bot-approve status" show="/bot-approve status"/> 查看当前配置`,
+      ].join("\n");
+    }
+    const configApi = runtime.config as {
+      loadConfig: () => Record<string, unknown>;
+      writeConfigFile: (cfg: unknown) => Promise<void>;
+    };
+
+    const loadExecConfig = () => {
+      const cfg = configApi.loadConfig() as Record<string, unknown>;
+      const tools = (cfg.tools ?? {}) as Record<string, unknown>;
+      const exec = (tools.exec ?? {}) as Record<string, unknown>;
+      return {
+        security: String(exec.security ?? "deny"),
+        ask: String(exec.ask ?? "on-miss"),
+      };
+    };
+
+    const writeExecConfig = async (security: string, ask: string) => {
+      const cfg = structuredClone(configApi.loadConfig()) as Record<string, unknown>;
+      const tools = ((cfg.tools ?? {}) as Record<string, unknown>);
+      const exec = ((tools.exec ?? {}) as Record<string, unknown>);
+      exec.security = security;
+      exec.ask = ask;
+      tools.exec = exec;
+      cfg.tools = tools;
+      await configApi.writeConfigFile(cfg);
+    };
+
+    const formatStatus = (security: string, ask: string) => {
+      const secIcon = security === "full" ? "🟢" : security === "allowlist" ? "🟡" : "🔴";
+      const askIcon = ask === "off" ? "🟢" : ask === "always" ? "🔴" : "🟡";
+      return [
+        `🔐 当前审批配置`,
+        ``,
+        `${secIcon} 安全模式 (security): **${security}**`,
+        `${askIcon} 审批模式 (ask): **${ask}**`,
+        ``,
+        security === "deny" ? `⚠️ 当前为 deny 模式，所有命令执行被拒绝` :
+        security === "full" && ask === "off" ? `✅ 所有命令无需审批直接执行` :
+        security === "allowlist" && ask === "on-miss" ? `🛡️ 白名单命令直接执行，其余需审批` :
+        ask === "always" ? `🔒 每次命令执行都需要人工审批` :
+        `ℹ️ security=${security}, ask=${ask}`,
+      ].join("\n");
+    };
+
+    // 无参数：操作指引
+    if (!arg) {
+      return [
+        `🔐 命令执行审批配置`,
+        ``,
+        `<umibot-cmd-input text="/bot-approve on" show="/bot-approve on"/> 开启审批（白名单模式）`,
+        `<umibot-cmd-input text="/bot-approve off" show="/bot-approve off"/> 关闭审批`,
+        `<umibot-cmd-input text="/bot-approve always" show="/bot-approve always"/> 严格模式`,
+        `<umibot-cmd-input text="/bot-approve reset" show="/bot-approve reset"/> 恢复默认`,
+        `<umibot-cmd-input text="/bot-approve status" show="/bot-approve status"/> 查看当前配置`,
+      ].join("\n");
+    }
+
+    // status: 查看当前配置
+    if (arg === "status") {
+      const { security, ask } = loadExecConfig();
+      return [
+        formatStatus(security, ask),
+        ``,
+        `<umibot-cmd-input text="/bot-approve on" show="/bot-approve on"/> 开启审批`,
+        `<umibot-cmd-input text="/bot-approve off" show="/bot-approve off"/> 关闭审批`,
+        `<umibot-cmd-input text="/bot-approve always" show="/bot-approve always"/> 严格模式`,
+        `<umibot-cmd-input text="/bot-approve reset" show="/bot-approve reset"/> 恢复默认`,
+      ].join("\n");
+    }
+
+    // on: 开启审批（白名单 + 未命中审批）
+    if (arg === "on") {
+      try {
+        await writeExecConfig("allowlist", "on-miss");
+        return [
+          `✅ 审批已开启`,
+          ``,
+          `• security = allowlist（白名单模式）`,
+          `• ask = on-miss（未命中白名单时需审批）`,
+          ``,
+          `已批准的命令自动加入白名单，下次直接执行。`,
+        ].join("\n");
+      } catch (err) {
+        return `❌ 配置更新失败: ${err}`;
+      }
+    }
+
+    // off: 关闭审批
+    if (arg === "off") {
+      try {
+        await writeExecConfig("full", "off");
+        return [
+          `✅ 审批已关闭`,
+          ``,
+          `• security = full（允许所有命令）`,
+          `• ask = off（不需要审批）`,
+          ``,
+          `⚠️ 所有命令将直接执行，不会弹出审批确认。`,
+        ].join("\n");
+      } catch (err) {
+        return `❌ 配置更新失败: ${err}`;
+      }
+    }
+
+    // always: 始终审批（每次都审批）
+    if (arg === "always") {
+      try {
+        await writeExecConfig("allowlist", "always");
+        return [
+          `✅ 已切换为严格审批模式`,
+          ``,
+          `• security = allowlist`,
+          `• ask = always（每次执行都需审批）`,
+          ``,
+          `每个命令都会弹出审批按钮，需手动确认。`,
+        ].join("\n");
+      } catch (err) {
+        return `❌ 配置更新失败: ${err}`;
+      }
+    }
+
+    // reset: 删除配置，恢复框架默认值
+    if (arg === "reset") {
+      try {
+        const cfg = structuredClone(configApi.loadConfig()) as Record<string, unknown>;
+        const tools = (cfg.tools ?? {}) as Record<string, unknown>;
+        const exec = (tools.exec ?? {}) as Record<string, unknown>;
+        delete exec.security;
+        delete exec.ask;
+        if (Object.keys(exec).length === 0) {
+          delete tools.exec;
+        } else {
+          tools.exec = exec;
+        }
+        if (Object.keys(tools).length === 0) {
+          delete cfg.tools;
+        } else {
+          cfg.tools = tools;
+        }
+        await configApi.writeConfigFile(cfg);
+        return [
+          `✅ 审批配置已重置`,
+          ``,
+          `已移除 tools.exec.security 和 tools.exec.ask`,
+          `框架将使用默认值（security=deny, ask=on-miss）`,
+          ``,
+          `如需开启命令执行，请使用 /bot-approve on`,
+        ].join("\n");
+      } catch (err) {
+        return `❌ 配置更新失败: ${err}`;
+      }
+    }
+
+    return [
+      `❌ 未知参数: ${arg}`,
+      ``,
+      `可用选项: on | off | always | reset`,
+      `输入 /bot-approve ? 查看详细用法`,
+    ].join("\n");
+  },
+});
 
 // ============ 匹配入口 ============
 

@@ -4,7 +4,7 @@
   "description": "UMI Bot channel plugin with message support, cron jobs, and proactive messaging",
   "channels": ["umibot"],
   "extensions": ["./preload.cjs"],
-  "skills": ["skills/umibot-channel", "skills/umibot-remind", "skills/umibot-media"],
+  "skills": ["skills/umibot-channel", "skills/umibot-remind", "skills/umibot-media", "skills/umibot-upgrade"],
   "capabilities": {
     "proactiveMessaging": true,
     "cronJobs": true
@@ -13,5 +13,10 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "channelConfigs": {
+    "umibot": {
+      "preferOver": ["umibot"]
+    }
   }
 }

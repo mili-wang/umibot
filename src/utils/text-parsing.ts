@@ -3,6 +3,8 @@
  */
 
 import type { RefAttachmentSummary } from "../ref-index-store.js";
+import { inferAttachmentType } from "../group-history.js";
+import { MSG_TYPE_QUOTE } from "../types.js";
 
 /**
  * 解析 UMI 表情标签，将 <faceType=1,faceId="13",ext="base64..."> 格式
@@ -39,19 +41,28 @@ export function filterInternalMarkers(text: string): string {
   return result;
 }
 
-/**
- * 从 message_scene.ext 数组中解析引用索引
- * ext 格式示例: ["", "ref_msg_idx=REFIDX_xxx", "msg_idx=REFIDX_yyy"]
- */
-export function parseRefIndices(ext?: string[]): { refMsgIdx?: string; msgIdx?: string } {
-  if (!ext || ext.length === 0) return {};
+/** 从 ext 和 msg_elements 中解析引用索引，仅 MSG_TYPE_QUOTE 时取 msg_elements */
+export function parseRefIndices(
+  ext?: string[],
+  messageType?: number,
+  msgElements?: Array<{ msg_idx?: string }>,
+): { refMsgIdx?: string; msgIdx?: string } {
   let refMsgIdx: string | undefined;
   let msgIdx: string | undefined;
-  for (const item of ext) {
-    if (item.startsWith("ref_msg_idx=")) {
-      refMsgIdx = item.slice("ref_msg_idx=".length);
-    } else if (item.startsWith("msg_idx=")) {
-      msgIdx = item.slice("msg_idx=".length);
+  if (ext && ext.length > 0) {
+    for (const item of ext) {
+      if (item.startsWith("ref_msg_idx=")) {
+        refMsgIdx = item.slice("ref_msg_idx=".length);
+      } else if (item.startsWith("msg_idx=")) {
+        msgIdx = item.slice("msg_idx=".length);
+      }
+    }
+  }
+  // 仅当 message_type=MSG_TYPE_QUOTE（引用消息）时，msg_elements[0].msg_idx 更权威，有值时覆盖 ext 解析结果
+  if (messageType === MSG_TYPE_QUOTE) {
+    const refElement = msgElements?.[0];
+    if (refElement?.msg_idx) {
+      refMsgIdx = refElement.msg_idx;
     }
   }
   return { refMsgIdx, msgIdx };
@@ -65,18 +76,10 @@ export function buildAttachmentSummaries(
   localPaths?: Array<string | null>,
 ): RefAttachmentSummary[] | undefined {
   if (!attachments || attachments.length === 0) return undefined;
-  return attachments.map((att, idx) => {
-    const ct = att.content_type?.toLowerCase() ?? "";
-    let type: RefAttachmentSummary["type"] = "unknown";
-    if (ct.startsWith("image/")) type = "image";
-    else if (ct === "voice" || ct.startsWith("audio/") || ct.includes("silk") || ct.includes("amr")) type = "voice";
-    else if (ct.startsWith("video/")) type = "video";
-    else if (ct.startsWith("application/") || ct.startsWith("text/")) type = "file";
-    return {
-      type,
-      filename: att.filename,
-      contentType: att.content_type,
-      localPath: localPaths?.[idx] ?? undefined,
-    };
-  });
+  return attachments.map((att, idx) => ({
+    type: inferAttachmentType(att.content_type),
+    filename: att.filename,
+    contentType: att.content_type,
+    localPath: localPaths?.[idx] ?? undefined,
+  }));
 }

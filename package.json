@@ -1,6 +1,9 @@
 {
   "name": "@mili-wang/umibot",
-  "version": "0.0.4",
+  "version": "0.0.5",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

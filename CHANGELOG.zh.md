@@ -4,6 +4,81 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [1.7.1] - 2026-04-10
+
+### 修复
+
+- **升级脚本适配OpenClaw 2026.4.9版本**：
+  - 修复独立版插件安装失败问题。
+  - 修复独立版与融合版兼容问题。
+  - 新增通道配置自动修复（`additional properties` 校验错误）
+
+### ⚠️ OpenClaw 2026.4.5 注意事项
+
+OpenClaw 2026.4.5 对通道配置引入了严格的合法性校验，流式输出、群聊等独立插件扩展的新增的配置字段会被判定为非法属性，导致 gateway 无法启动。升级脚本已自动备份原配置并移除不被识别的字段以恢复启动。如需使用流式输出、群聊等独立插件专属能力，建议将 OpenClaw 降级到 2026.4.2 及以下版本。
+
+## [1.7.1] - 2026-04-03
+
+### 新增
+
+- **命令执行审批**：AI 执行命令前通过 QQ 消息发送带按钮（✅ 允许一次 / ⭐ 始终允许 / ❌ 拒绝）的审批请求，用户点击按钮即可完成审批。
+- **`/bot-approve` 指令**：新增审批配置管理指令，支持 `on`（打开白名单模式审批）、`off`（关闭审批）、`always`（严格模式）、`reset`（恢复默认）、`status`（查看配置）。
+
+## [1.7.0] - 2026-04-02
+
+### 新增
+
+- **消息引用优化**：支持解析 QQ 消息事件中新增的引用消息字段，换设备也支持引用，使 AI 能够感知用户在回复哪条消息，从而在对话中准确理解引用上下文、实现更连贯的回复。
+- **`umibot-upgrade` Skill**：新增插件升级引导 Skill，支持自然语言触发版本更新；优化 Skill 升级交互体验。
+
+### 修复
+
+- **Windows 文件路径编码异常**：修复 Windows 下路径编码异常导致文件无法正常发送的问题。
+
+### 变更
+
+- **升级脚本重构 v4**：重构降级架构，兼容OpenClaw 2026.3.31版本，提升升级流程的稳定性与兼容性。
+
+### ⚠️ 特别注意：OpenClaw 2026.3.31 内置插件冲突
+
+OpenClaw 于 2026.3.31 版本起已内置 UMIBot 插件。若直接将 OpenClaw 升级到最新版，可能与独立插件产生冲突，导致新增功能不可用。
+
+**解决方案（二选一）：**
+
+**方案一：使用升级脚本更新本插件到最新版**（推荐）
+
+本版本已适配内置插件冲突，升级后自动接管优先级：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-umibot/main/scripts/upgrade-via-npm.sh | bash
+```
+
+**方案二：通过配置禁用内置版本**
+
+可通过以下命令禁用 OpenClaw 内置的 UMIBot 插件：
+
+```bash
+openclaw config set plugins.entries.umibot.enabled false
+```
+
+## [1.6.7] - 2026-03-30
+
+### 修复
+
+- **多账户提醒投递失败**：修复 cron 任务 delivery 缺少 `accountId`，导致多账户场景下提醒消息无法通过正确的机器人账户发送。`accountId` 改为必填，使用 `getRequestAccountId() || "default"` 确保永不为空；delivery 结构迁移到 job 顶层。
+- **升级脚本与 `/bot-upgrade` 改进**：完善 `--version` 参数解析逻辑，优化版本检查流程；升级脚本（npm/source）增强兼容性。
+- **`postinstall-link-sdk` 脚本优化**：改进安装后 SDK 链接脚本的健壮性。
+
+### 升级方式
+
+执行此指令可以升级为最新版：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-umibot/main/scripts/upgrade-via-npm.sh | bash
+```
+
+> ⚠️ v1.6.6 及以下版本暂不支持通过 `/bot-upgrade` 执行热更新，请使用上述命令进行升级。
+
 ## [1.6.6] - 2026-03-26
 
 ### 新增

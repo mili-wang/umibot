@@ -92,30 +92,44 @@ echo "========================================="
 echo ""
 echo "[1/6] 备份已有配置..."
 SAVED_QQBOT_TOKEN=""
+SAVED_QQBOT_CONFIG_FILE=""  # 有 umibot 配置的文件路径
+SAVED_QQBOT_CHANNEL_JSON="" # 完整 channels.umibot JSON
+
+# 完整备份 channels.umibot 对象（含 token / groups / env / allowFrom 等）
 for APP_NAME in openclaw clawdbot moltbot; do
     CONFIG_FILE="$HOME/.$APP_NAME/$APP_NAME.json"
     if [ -f "$CONFIG_FILE" ]; then
-        SAVED_QQBOT_TOKEN=$(node -e "
+        SAVED_QQBOT_CHANNEL_JSON=$(node -e "
             const cfg = JSON.parse(require('fs').readFileSync('$CONFIG_FILE', 'utf8'));
-            // 尝试所有可能的 channel key（原仓库 + 本仓库）
-            const keys = ['umibot', 'umibot', 'openclaw-umi'];
+            const keys = ['umibot', 'openclaw-umibot', 'openclaw-qq'];
             for (const key of keys) {
                 const ch = cfg.channels && cfg.channels[key];
-                if (!ch) continue;
-                if (ch.token) { process.stdout.write(ch.token); process.exit(0); }
-                if (ch.appId && ch.clientSecret) { process.stdout.write(ch.appId + ':' + ch.clientSecret); process.exit(0); }
+                if (ch && Object.keys(ch).length > 0) {
+                    process.stdout.write(JSON.stringify(ch));
+                    process.exit(0);
+                }
             }
         " 2>/dev/null || true)
-        if [ -n "$SAVED_QQBOT_TOKEN" ]; then
-            echo "已备份 umibot 通道 token: ${SAVED_QQBOT_TOKEN:0:10}..."
+        if [ -n "$SAVED_QQBOT_CHANNEL_JSON" ]; then
+            SAVED_QQBOT_CONFIG_FILE="$CONFIG_FILE"
+            # 提取 token 供 Step 4 fallback
+            SAVED_QQBOT_TOKEN=$(node -e "
+                const ch = JSON.parse(process.argv[1]);
+                if (ch.token) { process.stdout.write(ch.token); }
+                else if (ch.appId && ch.clientSecret) { process.stdout.write(ch.appId + ':' + ch.clientSecret); }
+            " "$SAVED_QQBOT_CHANNEL_JSON" 2>/dev/null || true)
+            echo "已备份完整 umibot 通道配置"
+            if [ -n "$SAVED_QQBOT_TOKEN" ]; then
+                echo "  token: ${SAVED_QQBOT_TOKEN:0:10}..."
+            fi
             break
         fi
     fi
 done
 
-# 若当前配置中没有，再尝试从 openclaw 备份文件恢复
-if [ -z "$SAVED_QQBOT_TOKEN" ] && [ -d "$HOME/.openclaw" ]; then
-    SAVED_QQBOT_TOKEN=$(node -e "
+# 若当前配置中没有，从 openclaw 备份文件恢复
+if [ -z "$SAVED_QQBOT_CHANNEL_JSON" ] && [ -d "$HOME/.openclaw" ]; then
+    SAVED_QQBOT_CHANNEL_JSON=$(node -e "
       const fs = require('fs');
       const path = require('path');
       const dir = path.join(process.env.HOME, '.openclaw');
@@ -129,16 +143,25 @@ if [ -z "$SAVED_QQBOT_TOKEN" ] && [ -d "$HOME/.openclaw" ]; then
           const keys = ['umibot', 'umibot', 'openclaw-umi'];
           for (const key of keys) {
             const ch = cfg.channels && cfg.channels[key];
-            if (!ch) continue;
-            if (ch.token) { process.stdout.write(ch.token); process.exit(0); }
-            if (ch.appId && ch.clientSecret) { process.stdout.write(ch.appId + ':' + ch.clientSecret); process.exit(0); }
+            if (ch && Object.keys(ch).length > 0) {
+              process.stdout.write(JSON.stringify(ch));
+              process.exit(0);
+            }
           }
         } catch {}
       }
     " 2>/dev/null || true)
 
-    if [ -n "$SAVED_QQBOT_TOKEN" ]; then
-        echo "已从 ~/.openclaw/openclaw.json.bak* 找到 umibot 备份 token: ${SAVED_QQBOT_TOKEN:0:10}..."
+    if [ -n "$SAVED_QQBOT_CHANNEL_JSON" ]; then
+        SAVED_QQBOT_TOKEN=$(node -e "
+            const ch = JSON.parse(process.argv[1]);
+            if (ch.token) { process.stdout.write(ch.token); }
+            else if (ch.appId && ch.clientSecret) { process.stdout.write(ch.appId + ':' + ch.clientSecret); }
+        " "$SAVED_QQBOT_CHANNEL_JSON" 2>/dev/null || true)
+        echo "已从 ~/.openclaw/openclaw.json.bak* 恢复 umibot 通道配置"
+        if [ -n "$SAVED_QQBOT_TOKEN" ]; then
+            echo "  token: ${SAVED_QQBOT_TOKEN:0:10}..."
+        fi
     fi
 fi
 
@@ -239,8 +262,9 @@ if lsof -i :18789 -sTCP:LISTEN >/dev/null 2>&1; then
     sleep 1
 fi
 
-# 清理之前可能残留的 staging 目录
+# 清理之前可能残留的 staging 目录（extensions 和 /tmp 中都可能存在）
 find "$HOME/.openclaw/extensions/" -maxdepth 1 -name ".openclaw-install-stage-*" -exec rm -rf {} + 2>/dev/null || true
+find "${TMPDIR:-/tmp}" -maxdepth 1 -name ".openclaw-install-stage-*" -exec rm -rf {} + 2>/dev/null || true
 
 # ── 清空并重新构建 dist/ ──
 # openclaw plugins install . 只做文件复制，不执行 npm lifecycle scripts。
@@ -266,8 +290,26 @@ fi
 # 注意：openclaw plugins install 会在安装后尝试验证加载插件，
 # 由于 CJS/ESM 混用问题（Node 22 ERR_INTERNAL_ASSERTION），验证阶段可能失败
 # 但文件已成功拷贝。因此不依赖退出码，而是检查安装目录中关键文件是否存在。
-_INSTALL_DIR="$HOME/.openclaw/extensions/umibot"
+_INSTALL_DIR="$HOME/.openclaw/extensions/openclaw-umibot"
+
+# ── 优化：安装前临时移走 node_modules ──
+# openclaw plugins install . 会把整个项目目录（含 node_modules/）复制到 extensions，
+# 但运行时只需要 bundledDependencies 中的 3 个包 + openclaw symlink。
+# 移走 node_modules 可避免复制数百个不必要的包，大幅加速安装。
+_NM_BACKUP=""
+if [ -d "$PROJ_DIR/node_modules" ]; then
+    echo "  临时移走 node_modules（避免整体复制到 extensions）..."
+    _NM_BACKUP="$PROJ_DIR/.node_modules_install_bak"
+    mv "$PROJ_DIR/node_modules" "$_NM_BACKUP"
+fi
+
 openclaw plugins install . 2>&1 | tee "$INSTALL_LOG" || true
+
+# ── 恢复 node_modules ──
+if [ -n "$_NM_BACKUP" ] && [ -d "$_NM_BACKUP" ]; then
+    mv "$_NM_BACKUP" "$PROJ_DIR/node_modules"
+    echo "  已恢复源码目录 node_modules"
+fi
 if [ ! -f "$_INSTALL_DIR/dist/index.js" ] || [ ! -f "$_INSTALL_DIR/preload.cjs" ]; then
     echo ""
     echo "❌ 插件安装失败！"
@@ -321,13 +363,13 @@ if [ ! -f "$_INSTALL_DIR/dist/index.js" ] || [ ! -f "$_INSTALL_DIR/preload.cjs" 
             echo "请先解决安装问题后再运行此脚本。"
             # 恢复 channels.umibot 后再退出
             if [ -n "$_QQBOT_CHANNEL_STASH" ] && [ -n "$_STASH_CFG" ] && [ -f "$_STASH_CFG" ]; then
-                node -e "
-                    const fs = require('fs');
-                    const cfg = JSON.parse(fs.readFileSync('$_STASH_CFG', 'utf8'));
+                _STASH="$_QQBOT_CHANNEL_STASH" _CFG="$_STASH_CFG" node -e '
+                    const fs = require("fs");
+                    const cfg = JSON.parse(fs.readFileSync(process.env._CFG, "utf8"));
                     if (!cfg.channels) cfg.channels = {};
-                    cfg.channels.umibot = $_QQBOT_CHANNEL_STASH;
-                    fs.writeFileSync('$_STASH_CFG', JSON.stringify(cfg, null, 4) + '\n');
-                " 2>/dev/null || true
+                    cfg.channels.umibot = JSON.parse(process.env._STASH);
+                    fs.writeFileSync(process.env._CFG, JSON.stringify(cfg, null, 4) + "\n");
+                ' 2>/dev/null || true
             fi
             exit 1
             ;;  
@@ -375,6 +417,13 @@ else
         echo ""
         echo "  尝试自动修复: 清理残留并重试安装..."
         find "$HOME/.openclaw/extensions/" -maxdepth 1 -name ".openclaw-install-stage-*" -exec rm -rf {} + 2>/dev/null || true
+        find "${TMPDIR:-/tmp}" -maxdepth 1 -name ".openclaw-install-stage-*" -exec rm -rf {} + 2>/dev/null || true
+        # 重试时同样移走 node_modules 避免整体复制
+        _NM_BACKUP=""
+        if [ -d "$PROJ_DIR/node_modules" ]; then
+            _NM_BACKUP="$PROJ_DIR/.node_modules_install_bak"
+            mv "$PROJ_DIR/node_modules" "$_NM_BACKUP"
+        fi
         if openclaw plugins install . 2>&1 | tee -a "$INSTALL_LOG"; then
             for _candidate_name in umibot umibot openclaw-umi; do
                 if [ -d "$HOME/.openclaw/extensions/$_candidate_name" ]; then
@@ -383,6 +432,10 @@ else
                     break
                 fi
             done
+        fi
+        # 恢复 node_modules
+        if [ -n "$_NM_BACKUP" ] && [ -d "$_NM_BACKUP" ]; then
+            mv "$_NM_BACKUP" "$PROJ_DIR/node_modules"
         fi
         if [ "$_plugin_dir_ok" -eq 0 ]; then
             echo "  ❌ 重试安装仍失败，插件目录不存在"
@@ -417,18 +470,70 @@ else
         fi
     fi
 
-    # 清理多余的 peerDependencies 传递依赖（兼容旧版 openclaw）：
-    # openclaw v2026.3.4 之前的 plugins install 缺少 --omit=peer，会把 peerDeps
-    # （openclaw 平台及其 400+ 传递依赖）也安装到插件 node_modules 中。
-    # 新版已修复，此处通过阈值判断：包数量 > 50 才触发清理，避免对新版做无用操作。
+    # ── 复制 bundledDependencies 到插件 node_modules ──
+    # 由于安装前移走了源码的 node_modules，extensions 中的插件目录没有依赖。
+    # 只需复制 bundledDependencies（ws, silk-wasm, mpg123-decoder）及其传递依赖即可。
     PLUGIN_NM=""
     for _candidate in umibot umibot openclaw-umi; do
         _nm="$HOME/.openclaw/extensions/$_candidate/node_modules"
-        [ -d "$_nm" ] && PLUGIN_NM="$_nm" && break
+        _ext_dir="$HOME/.openclaw/extensions/$_candidate"
+        [ -d "$_ext_dir" ] && PLUGIN_NM="$_nm" && break
     done
-    if [ -n "$PLUGIN_NM" ]; then
+    if [ -n "$PLUGIN_NM" ] && [ -d "$PROJ_DIR/node_modules" ]; then
+        # 如果 extensions 中已有大量包（旧版 openclaw 安装的 peerDeps），先清理
+        if [ -d "$PLUGIN_NM" ]; then
+            _before=$(ls -d "$PLUGIN_NM"/*/ "$PLUGIN_NM"/@*/*/ 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$_before" -gt 50 ]; then
+                echo ""
+                echo "检测到 ${_before} 个包（超过阈值 50），清理多余的 peerDep 传递依赖..."
+                rm -rf "$PLUGIN_NM"
+            fi
+        fi
+
+        # 读取 bundledDependencies 及其传递依赖列表，只复制这些包
+        _deps_to_copy=$(node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const pkgPath = path.join('$PROJ_DIR', 'package.json');
+          if (!fs.existsSync(pkgPath)) process.exit(0);
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          const bundled = pkg.bundledDependencies || pkg.bundleDependencies || [];
+          const keep = new Set();
+          const resolve = (name) => {
+            if (keep.has(name)) return;
+            keep.add(name);
+            const depPkg = path.join('$PROJ_DIR', 'node_modules', name, 'package.json');
+            if (!fs.existsSync(depPkg)) return;
+            const dep = JSON.parse(fs.readFileSync(depPkg, 'utf8'));
+            for (const d of Object.keys(dep.dependencies || {})) resolve(d);
+          };
+          bundled.forEach(resolve);
+          process.stdout.write([...keep].join('\\n'));
+        " 2>/dev/null || true)
+
+        if [ -n "$_deps_to_copy" ]; then
+            mkdir -p "$PLUGIN_NM"
+            _copied=0
+            echo "$_deps_to_copy" | while IFS= read -r _dep; do
+                _src="$PROJ_DIR/node_modules/$_dep"
+                _dst="$PLUGIN_NM/$_dep"
+                if [ -d "$_src" ] && [ ! -d "$_dst" ]; then
+                    # 处理 scoped 包（如 @scope/pkg）
+                    mkdir -p "$(dirname "$_dst")"
+                    cp -r "$_src" "$_dst"
+                fi
+            done
+            _after=$(ls -d "$PLUGIN_NM"/*/ "$PLUGIN_NM"/@*/*/ 2>/dev/null | wc -l | tr -d ' ')
+            echo "  ✅ 已复制 bundled 依赖到插件目录（${_after} 个包）"
+        else
+            echo "  ⚠️  未读取到 bundledDependencies，跳过依赖复制"
+        fi
+    elif [ -n "$PLUGIN_NM" ] && [ -d "$PLUGIN_NM" ]; then
+        # node_modules 已存在（可能是旧版 openclaw 安装的），检查是否需要清理
         _before=$(ls -d "$PLUGIN_NM"/*/ "$PLUGIN_NM"/@*/*/ 2>/dev/null | wc -l | tr -d ' ')
         if [ "$_before" -gt 50 ]; then
+            echo ""
+            echo "检测到 ${_before} 个包（超过阈值 50），清理多余的 peerDep 传递依赖..."
             # 读取 bundledDependencies 列表，只保留这些包及其子依赖
             _bundled_deps=$(node -e "
               const fs = require('fs');
@@ -467,8 +572,6 @@ else
               process.stdout.write(toRemove.join('\n'));
             " 2>/dev/null || true)
             if [ -n "$_bundled_deps" ]; then
-                echo ""
-                echo "检测到 ${_before} 个包（超过阈值 50），清理多余的 peerDep 传递依赖..."
                 echo "$_bundled_deps" | while IFS= read -r _pkg; do
                     rm -rf "$PLUGIN_NM/$_pkg"
                 done
@@ -503,7 +606,56 @@ else
 
     # 清理 openclaw CLI install 留下的 backup 目录，
     # 避免 gateway 发现两个同 id 插件不断刷 duplicate plugin id 警告
-    find "$HOME/.openclaw/extensions/" -maxdepth 1 -name ".umibot-backup-*" -exec rm -rf {} + 2>/dev/null || true
+    find "$HOME/.openclaw/extensions/" -maxdepth 1 -name ".openclaw-umibot-backup-*" -exec rm -rf {} + 2>/dev/null || true
+    find "${TMPDIR:-/tmp}" -maxdepth 1 -name ".umibot-upgrade-backup-*" -exec rm -rf {} + 2>/dev/null || true
+
+    # 恢复 channels.umibot 完整配置（防止 plugins install 意外覆盖）
+    # 策略：直接用备份完整覆盖回去，确保 groups / env / prompts / allowFrom 等所有用户配置不丢失。
+    if [ -n "$SAVED_QQBOT_CHANNEL_JSON" ]; then
+        node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const saved = JSON.parse(process.argv[1]);
+          for (const app of ['openclaw', 'clawdbot', 'moltbot']) {
+            const f = path.join(process.env.HOME, '.' + app, app + '.json');
+            if (!fs.existsSync(f)) continue;
+            const cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
+            if (!cfg.channels) { cfg.channels = {}; }
+            if (JSON.stringify(cfg.channels.umibot) === JSON.stringify(saved)) {
+              process.stderr.write('  channels.umibot 配置无变化，无需恢复\\n');
+            } else {
+              cfg.channels.umibot = saved;
+              fs.writeFileSync(f, JSON.stringify(cfg, null, 4) + '\\n');
+              process.stderr.write('  已完整恢复 channels.umibot 配置（' + Object.keys(saved).join(', ') + '）\\n');
+            }
+            break;
+          }
+        " "$SAVED_QQBOT_CHANNEL_JSON" 2>&1 || true
+    fi
+
+    # 恢复 channels.umibot 完整配置（防止 plugins install 意外覆盖）
+    # 策略：直接用备份完整覆盖回去，确保 groups / env / prompts / allowFrom 等所有用户配置不丢失。
+    if [ -n "$SAVED_QQBOT_CHANNEL_JSON" ]; then
+        node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const saved = JSON.parse(process.argv[1]);
+          for (const app of ['openclaw', 'clawdbot', 'moltbot']) {
+            const f = path.join(process.env.HOME, '.' + app, app + '.json');
+            if (!fs.existsSync(f)) continue;
+            const cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
+            if (!cfg.channels) { cfg.channels = {}; }
+            if (JSON.stringify(cfg.channels.umibot) === JSON.stringify(saved)) {
+              process.stderr.write('  channels.umibot 配置无变化，无需恢复\\n');
+            } else {
+              cfg.channels.umibot = saved;
+              fs.writeFileSync(f, JSON.stringify(cfg, null, 4) + '\\n');
+              process.stderr.write('  已完整恢复 channels.umibot 配置（' + Object.keys(saved).join(', ') + '）\\n');
+            }
+            break;
+          }
+        " "$SAVED_QQBOT_CHANNEL_JSON" 2>&1 || true
+    fi
 
     # 记录更新后的 umibot 插件版本
     NEW_QQBOT_VERSION=$(node -e '
@@ -544,11 +696,11 @@ echo "[4/6] 准备机器人通道配置..."
 # 注意：channels.umibot 已被暂存移除，所以从 _QQBOT_CHANNEL_STASH 读取
 CURRENT_QQBOT_TOKEN=""
 if [ -n "$_QQBOT_CHANNEL_STASH" ]; then
-    CURRENT_QQBOT_TOKEN=$(node -e "
-        const ch = $_QQBOT_CHANNEL_STASH;
+    CURRENT_QQBOT_TOKEN=$(_STASH="$_QQBOT_CHANNEL_STASH" node -e '
+        const ch = JSON.parse(process.env._STASH);
         if (ch.token) { process.stdout.write(ch.token); }
-        else if (ch.appId && ch.clientSecret) { process.stdout.write(ch.appId + ':' + ch.clientSecret); }
-    " 2>/dev/null || true)
+        else if (ch.appId && ch.clientSecret) { process.stdout.write(ch.appId + ":" + ch.clientSecret); }
+    ' 2>/dev/null || true)
 fi
 
 DESIRED_QQBOT_TOKEN=""
@@ -739,34 +891,39 @@ case "$start_choice" in
 
             if [ -n "$_target_cfg" ]; then
                 # 构建完整的 channels.umibot 对象（合并暂存配置 + 新 token + markdown）
-                node -e "
-                    const fs = require('fs');
-                    const cfg = JSON.parse(fs.readFileSync('$_target_cfg', 'utf8'));
+                # 通过环境变量传递，避免 JSON 双引号在 node -e "..." 中被 shell 错误解析
+                _STASH="$_QQBOT_CHANNEL_STASH" \
+                _DESIRED="$DESIRED_QQBOT_TOKEN" \
+                _MD="$MARKDOWN_VALUE" \
+                _CFG="$_target_cfg" \
+                node -e '
+                    const fs = require("fs");
+                    const cfg = JSON.parse(fs.readFileSync(process.env._CFG, "utf8"));
                     if (!cfg.channels) cfg.channels = {};
 
                     // 从暂存恢复基础配置
-                    const stash = '$_QQBOT_CHANNEL_STASH';
+                    const stash = process.env._STASH;
                     if (stash) {
                         try { cfg.channels.umibot = JSON.parse(stash); } catch {}
                     }
                     if (!cfg.channels.umibot) cfg.channels.umibot = {};
 
                     // 覆盖 token（如果有新值）
-                    const desired = '$DESIRED_QQBOT_TOKEN';
-                    if (desired && desired.includes(':')) {
-                        const [appId, ...rest] = desired.split(':');
+                    const desired = process.env._DESIRED;
+                    if (desired && desired.includes(":")) {
+                        const [appId, ...rest] = desired.split(":");
                         cfg.channels.umibot.appId = appId;
-                        cfg.channels.umibot.clientSecret = rest.join(':');
+                        cfg.channels.umibot.clientSecret = rest.join(":");
                         delete cfg.channels.umibot.token;
                     }
 
                     // 覆盖 markdown（如果有指定）
-                    const md = '$MARKDOWN_VALUE';
-                    if (md === 'true') cfg.channels.umibot.markdownSupport = true;
-                    else if (md === 'false') cfg.channels.umibot.markdownSupport = false;
+                    const md = process.env._MD;
+                    if (md === "true") cfg.channels.umibot.markdownSupport = true;
+                    else if (md === "false") cfg.channels.umibot.markdownSupport = false;
 
-                    fs.writeFileSync('$_target_cfg', JSON.stringify(cfg, null, 4) + '\n');
-                " 2>/dev/null || true
+                    fs.writeFileSync(process.env._CFG, JSON.stringify(cfg, null, 4) + "\n");
+                ' 2>&1 || echo "  ⚠️  配置写入失败"
                 echo "  ✅ 已恢复 channels.umibot 配置（含 token/markdown）"
                 _need_reload=1
             fi
@@ -836,13 +993,13 @@ case "$start_choice" in
         # 注意：下次 gateway 启动可能因 "unknown channel id" 失败，
         # 需要用户手动 stop → 移除 channels.umibot → start → 恢复
         if [ -n "$_QQBOT_CHANNEL_STASH" ] && [ -n "$_STASH_CFG" ] && [ -f "$_STASH_CFG" ]; then
-            node -e "
-                const fs = require('fs');
-                const cfg = JSON.parse(fs.readFileSync('$_STASH_CFG', 'utf8'));
+            _STASH="$_QQBOT_CHANNEL_STASH" _CFG="$_STASH_CFG" node -e '
+                const fs = require("fs");
+                const cfg = JSON.parse(fs.readFileSync(process.env._CFG, "utf8"));
                 if (!cfg.channels) cfg.channels = {};
-                cfg.channels.umibot = $_QQBOT_CHANNEL_STASH;
-                fs.writeFileSync('$_STASH_CFG', JSON.stringify(cfg, null, 4) + '\n');
-            " 2>/dev/null || true
+                cfg.channels.umibot = JSON.parse(process.env._STASH);
+                fs.writeFileSync(process.env._CFG, JSON.stringify(cfg, null, 4) + "\n");
+            ' 2>/dev/null || true
             echo "  已恢复 channels.umibot 配置"
         fi
         echo ""

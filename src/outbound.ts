@@ -17,10 +17,11 @@ import {
   sendC2CMediaMessage,
   sendGroupMediaMessage,
   MediaFileType,
+  UPLOAD_PREPARE_FALLBACK_CODE,
 } from "./api.js";
 import { isAudioFile, audioFileToSilkFile, waitForFile, shouldTranscodeVoice } from "./utils/audio-convert.js";
 import { fileExistsAsync, formatFileSize, getMaxUploadSize, getFileTypeName, getFileSizeAsync } from "./utils/file-utils.js";
-import { chunkedUploadC2C, chunkedUploadGroup } from "./utils/chunked-upload.js";
+import { chunkedUploadC2C, chunkedUploadGroup, UploadDailyLimitExceededError } from "./utils/chunked-upload.js";
 import { isLocalPath as isLocalFilePath, normalizePath, getQQBotMediaDir } from "./utils/platform.js";
 import { downloadFile } from "./image-server.js";
 import { parseMediaTagsToSendQueue, executeSendQueue, type MediaSendContext } from "./utils/media-send.js";
@@ -168,13 +169,46 @@ export interface MediaOutboundContext extends OutboundContext {
   mimeType?: string;
 }
 
+export const OUTBOUND_ERROR_CODES = {
+  FILE_TOO_LARGE: "file_too_large",
+  UPLOAD_DAILY_LIMIT_EXCEEDED: "upload_daily_limit_exceeded",
+} as const;
+
+export const DEFAULT_MEDIA_SEND_ERROR = "发送失败，请稍后重试。";
+
+export type OutboundErrorCode = typeof OUTBOUND_ERROR_CODES[keyof typeof OUTBOUND_ERROR_CODES];
+
 export interface OutboundResult {
   channel: string;
   messageId?: string;
   timestamp?: string | number;
   error?: string;
+  /** 稳定错误码，供上层按类型处理，避免依赖 error 文案 */
+  errorCode?: OutboundErrorCode;
+  /** QQ 开放平台业务错误码（如 upload_prepare 的 40093002） */
+  qqBizCode?: number;
   /** 出站消息的引用索引（ext_info.ref_idx），供引用消息缓存使用 */
   refIdx?: string;
+}
+
+/**
+ * 将媒体发送结果映射为可展示给用户的文案。
+ * 只对明确标记为可直接展示的错误码透传原文，其余统一走通用兜底。
+ */
+export function resolveUserFacingMediaError(result: Pick<OutboundResult, "error" | "errorCode" | "qqBizCode">): string {
+  if (!result.error) return DEFAULT_MEDIA_SEND_ERROR;
+
+  if (result.qqBizCode === UPLOAD_PREPARE_FALLBACK_CODE) {
+    return result.error;
+  }
+
+  switch (result.errorCode) {
+    case OUTBOUND_ERROR_CODES.FILE_TOO_LARGE:
+    case OUTBOUND_ERROR_CODES.UPLOAD_DAILY_LIMIT_EXCEEDED:
+      return result.error;
+    default:
+      return DEFAULT_MEDIA_SEND_ERROR;
+  }
 }
 
 /**
@@ -282,7 +316,7 @@ async function getToken(account: ResolvedQQBotAccount): Promise<string> {
 }
 
 /**
- * sendPhoto — 发送图片消息（对齐 Telegram sendPhoto）
+ * sendPhoto — 发送图片消息
  * 
  * 支持三种来源：
  * - 本地文件路径 → 分片上传
@@ -373,7 +407,7 @@ export async function sendPhoto(
 }
 
 /**
- * sendVoice — 发送语音消息（对齐 Telegram sendVoice）
+ * sendVoice — 发送语音消息
  * 
  * 支持本地音频文件和公网 URL：
  * - urlDirectUpload=true + 公网URL：先直传平台，失败后下载到本地再转码重试
@@ -460,7 +494,7 @@ async function sendVoiceFromLocal(
 }
 
 /**
- * sendVideoMsg — 发送视频消息（对齐 Telegram sendVideo）
+ * sendVideoMsg — 发送视频消息
  * 
  * 支持公网 URL（urlDirectUpload 控制直传或下载，失败自动 fallback）和本地文件路径。
  */
@@ -504,7 +538,7 @@ async function chunkedUploadAndSend(
 ): Promise<OutboundResult> {
   const { appId, clientSecret } = ctx.account;
   if (!appId || !clientSecret) {
-    return { channel: "umibot", error: "QQBot not configured (missing appId or clientSecret)" };
+    return { channel: "umibot", error: "UMIBot not configured (missing appId or clientSecret)" };
   }
 
   // 统一前置校验：文件存在 + 非空 + 大小上限
@@ -519,7 +553,11 @@ async function chunkedUploadAndSend(
   if (fileSize > maxSize) {
     const typeName = getFileTypeName(fileType);
     const limitMB = Math.round(maxSize / (1024 * 1024));
-    return { channel: "umibot", error: `${typeName}过大（${formatFileSize(fileSize)}），超过了${limitMB}M，暂时不能通过QQ直接发给你。` };
+    return {
+      channel: "umibot",
+      error: `${typeName}过大（${formatFileSize(fileSize)}），超过了${limitMB}M，暂时不能通过QQ直接发给你。`,
+      errorCode: OUTBOUND_ERROR_CODES.FILE_TOO_LARGE,
+    };
   }
 
   if (ctx.targetType === "c2c") {
@@ -541,6 +579,17 @@ async function chunkedUploadAndSend(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`${prefix} ${callerName}: c2c chunked upload failed: ${msg}`);
+      if (err instanceof UploadDailyLimitExceededError) {
+        const dir = path.dirname(err.filePath);
+        const name = path.basename(err.filePath);
+        const size = formatFileSize(err.fileSize);
+        return {
+          channel: "umibot",
+          error: `QQBot每天发送文件有累计2G的限制，如果着急的话，可以直接来我的主机copy下载，文件目录\`${dir}/${name}\`（${size}）`,
+          errorCode: OUTBOUND_ERROR_CODES.UPLOAD_DAILY_LIMIT_EXCEEDED,
+          qqBizCode: UPLOAD_PREPARE_FALLBACK_CODE,
+        };
+      }
       return { channel: "umibot", error: `文件发送失败，请稍后重试。` };
     }
   }
@@ -564,6 +613,17 @@ async function chunkedUploadAndSend(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`${prefix} ${callerName}: group chunked upload failed: ${msg}`);
+      if (err instanceof UploadDailyLimitExceededError) {
+        const dir = path.dirname(err.filePath);
+        const name = path.basename(err.filePath);
+        const size = formatFileSize(err.fileSize);
+        return {
+          channel: "umibot",
+          error: `QQBot每天发送文件有累计2G的限制，如果着急的话，可以直接来我的主机copy下载，文件目录\`${dir}/${name}\`（${size}）`,
+          errorCode: OUTBOUND_ERROR_CODES.UPLOAD_DAILY_LIMIT_EXCEEDED,
+          qqBizCode: UPLOAD_PREPARE_FALLBACK_CODE,
+        };
+      }
       return { channel: "umibot", error: `文件发送失败，请稍后重试。` };
     }
   }
@@ -581,7 +641,7 @@ async function sendVideoFromLocal(ctx: MediaTargetContext, mediaPath: string, pr
 }
 
 /**
- * sendDocument — 发送文件消息（对齐 Telegram sendDocument）
+ * sendDocument — 发送文件消息
  * 
  * 支持本地文件路径和公网 URL（urlDirectUpload 控制直传或下载，失败自动 fallback）。
  */
@@ -793,7 +853,7 @@ export async function sendText(ctx: OutboundContext): Promise<OutboundResult> {
     return lastResult;
   }
 
-  // ============ 主动消息校验（参考 Telegram 机制） ============
+  // ============ 主动消息校验 ============
   // 如果是主动消息（无 replyToId 或降级后），必须有消息内容
   if (!replyToId) {
     if (!text || text.trim().length === 0) {

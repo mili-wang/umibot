@@ -4,13 +4,31 @@ import {
 } from "openclaw/plugin-sdk/core";
 
 import type { ResolvedQQBotAccount } from "./types.js";
-import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, applyQQBotAccountConfig, resolveDefaultQQBotAccountId } from "./config.js";
-import { sendText, sendMedia } from "./outbound.js";
+import { DEFAULT_ACCOUNT_ID, listQQBotAccountIds, resolveQQBotAccount, applyQQBotAccountConfig, resolveDefaultQQBotAccountId, resolveRequireMention, resolveToolPolicy, resolveGroupConfig } from "./config.js";
+import { sendText, sendMedia, resolveUserFacingMediaError } from "./outbound.js";
 import { startGateway } from "./gateway.js";
 import { umibotOnboardingAdapter } from "./onboarding.js";
 import { getQQBotRuntime } from "./runtime.js";
 import { saveCredentialBackup, loadCredentialBackup } from "./credential-backup.js";
 import { initApiConfig } from "./api.js";
+import { getApprovalHandler } from "./approval-handler.js";
+
+/** 检查 payload 是否为审批消息（与 getExecApprovalReplyMetadata 等效，内联避免版本兼容问题） */
+function isApprovalPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const p = payload as Record<string, unknown>;
+  // channelData.execApproval 存在 → exec/plugin approval pending/resolved
+  const cd = p.channelData;
+  if (cd && typeof cd === "object" && !Array.isArray(cd)) {
+    const execApproval = (cd as Record<string, unknown>).execApproval;
+    if (execApproval && typeof execApproval === "object" && !Array.isArray(execApproval)) {
+      return true;
+    }
+  }
+  // text 匹配兜底：框架渲染的审批纯文本通知
+  const text = typeof p.text === "string" ? p.text : "";
+  return /(?:Plugin|Exec) approval (?:required|allowed|denied|expired)/i.test(text);
+}
 
 function setAccountEnabledInConfigSection(ctx: {
   cfg: OpenClawConfig;
@@ -97,7 +115,18 @@ export function chunkText(text: string, limit: number): string[] {
   return runtime.channel.text.chunkMarkdownText(text, limit);
 }
 
-export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
+function buildChannelMediaError(result: Parameters<typeof resolveUserFacingMediaError>[0]): Error {
+  const err = new Error(resolveUserFacingMediaError(result));
+  if (result.errorCode) {
+    (err as Error & { code?: string }).code = result.errorCode;
+  }
+  if (result.qqBizCode !== undefined) {
+    (err as Error & { qqBizCode?: number }).qqBizCode = result.qqBizCode;
+  }
+  return err;
+}
+
+export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
   id: "umibot",
   meta: {
     id: "umibot",
@@ -119,9 +148,50 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     blockStreaming: true,
   },
   reload: { configPrefixes: ["channels.umibot"] },
+
+  // ============ 群消息策略适配器 ============
+  groups: {
+    /** 是否需要 @机器人才响应 */
+    resolveRequireMention: ({ cfg, accountId, groupId }) => {
+      if (!groupId) return undefined;
+      return resolveRequireMention(cfg, groupId, accountId ?? undefined);
+    },
+
+    /** 群聊工具范围 */
+    resolveToolPolicy: ({ cfg, accountId, groupId }) => {
+      if (!groupId) return undefined;
+      const policy = resolveToolPolicy(cfg, groupId, accountId ?? undefined);
+      // 将简单字符串策略映射为 GroupToolPolicyConfig 对象
+      if (policy === "full") return undefined; // full = 默认不限制
+      if (policy === "none") return { allow: [], deny: ["*"] };
+      // restricted: 默认空 allow（框架会使用内置 restricted 列表）
+      return { allow: [] };
+    },
+
+    /** QQ Bot 平台特有的群聊行为提示 */
+    resolveGroupIntroHint: ({ cfg, accountId, groupId }) => {
+      if (!groupId) return undefined;
+      const groupCfg = resolveGroupConfig(cfg, groupId, accountId ?? undefined);
+      const hints: string[] = [];
+      if (groupCfg.name) {
+        hints.push(`当前群: ${groupCfg.name}`);
+      }
+      // bot 互聊防护、@状态行为指引在 gateway.ts 动态注入
+      return hints.join(" ") || undefined;
+    },
+  },
+
+  // ============ @mention 检测与清理 ============
+  mentions: {
+    /** 清理 @mention 文本（SDK ChannelMentionAdapter 接口） */
+    stripMentions: ({ text, ctx }) => {
+      const mentions = (ctx as any)?.mentions as Array<{ member_openid?: string; id?: string; user_openid?: string; is_you?: boolean; nickname?: string; username?: string }> | undefined;
+      return stripMentionText(text, mentions);
+    },
+  },
   // CLI onboarding wizard
-  // @ts-expect-error onboarding removed from ChannelPlugin type in 2026.3.23 but still supported at runtime
-  onboarding: umibotOnboardingAdapter,
+  // @ts-ignore onboarding removed from ChannelPlugin type in 2026.3.23 but still supported at runtime
+  onboarding: qqbotOnboardingAdapter,
 
   config: {
     listAccountIds: (cfg) => listQQBotAccountIds(cfg),
@@ -288,9 +358,11 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     chunker: (text, limit) => getQQBotRuntime().channel.text.chunkMarkdownText(text, limit),
     chunkerMode: "markdown",
     textChunkLimit: 5000,
-    sendText: async (ctx) => {
-      const { to, text, accountId, replyToId, cfg } = ctx;
-      const roomId = (ctx as { roomId?: string }).roomId;
+    // 3.31+ outbound 路径：dispatch-from-config → shouldSuppressLocalExecApprovalPrompt → outbound.shouldSuppressLocalPayloadPrompt
+    shouldSuppressLocalPayloadPrompt: ({ accountId, payload }: any) =>
+      getApprovalHandler(accountId ?? "") != null &&
+      isApprovalPayload(payload),
+    sendText: async ({ to, text, accountId, replyToId, cfg, roomId }) => {
       console.log(`[umibot:channel] sendText called — accountId=${accountId}, to=${to}, replyToId=${replyToId}, text.length=${text?.length ?? 0}`);
       console.log(`[umibot:channel] sendText text preview: ${text?.slice(0, 100)}${(text?.length ?? 0) > 100 ? "..." : ""}`);
       const account = resolveQQBotAccount(cfg, accountId ?? undefined);
@@ -314,17 +386,12 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       const result = await sendMedia({ to, text: text ?? "", mediaUrl: mediaUrl ?? "", accountId, replyToId, roomId, account });
       console.log(`[umibot:channel] sendMedia result: messageId=${result.messageId}, error=${result.error ?? "none"}`);
       // 此 sendMedia 是框架 Channel Plugin 的标准出站接口，
-      // 用于非 gateway deliver 场景（如 API 直接发送、cron 等）。
-      // gateway 消息响应走的是 deliver 回调 → sendPlainReply，不经过此处。
-      // 框架拿到 error 后不一定会给用户发文字兜底，所以这里主动发一条。
+      // 由框架 deliver.js (deliverOutboundPayloads) 或 message-actions 调用。
+      // 当 throw Error 后，框架 pi-tool-definition-adapter 会将错误转化为
+      // tool 的 { status: "error" } 返回给 AI 模型，模型会自行生成错误回复给用户。
+      // 因此此处不应主动发送兜底文本，否则会与模型的回复重复。
       if (result.error) {
-        try {
-          const fallbackResult = await sendText({ to, text: result.error, accountId, replyToId, roomId, account });
-          console.log(`[umibot:channel] sendMedia fallback text sent: messageId=${fallbackResult.messageId}, error=${fallbackResult.error ?? "none"}`);
-        } catch (fallbackErr) {
-          console.error(`[umibot:channel] sendMedia fallback text failed: ${fallbackErr}`);
-        }
-        throw new Error(result.error);
+        throw buildChannelMediaError(result);
       }
       return {
         channel: "umibot" as const,
@@ -463,4 +530,103 @@ export const umibotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
       lastOutboundAt: runtime?.lastOutboundAt ?? null,
     }),
   },
+  // UMIBot approval-handler 通过独立 WS 连接自行处理 exec + plugin 审批消息投递（带 Inline Keyboard），
+  // 完全屏蔽框架 Forwarder 的纯文本通知。
+  //
+  // ── 3.28 扁平结构 ──
+  execApprovals: {
+    // 3.28 框架通过此方法判断 channel 是否支持审批
+    getInitiatingSurfaceState: ({ accountId }: { cfg: any; accountId?: string | null }) => {
+      return getApprovalHandler(accountId ?? "") != null
+        ? { kind: "enabled" as const }
+        : { kind: "disabled" as const };
+    },
+    shouldSuppressForwardingFallback: (...args: any[]) => {
+      console.log("[UMIBot] shouldSuppressForwardingFallback called", JSON.stringify(args?.[0]?.target ?? null));
+      return true;
+    },
+    shouldSuppressLocalPrompt: ({ accountId, payload }: any) =>
+      getApprovalHandler(accountId ?? "") != null &&
+      isApprovalPayload(payload),
+    buildPendingPayload: () => null,
+    buildResolvedPayload: () => null,
+  },
+  // ── 3.31+ 嵌套结构 ──
+  // auth 和 approvals 是 ChannelPlugin 顶层平级字段
+  //
+  // UMIBot 审批模型：
+  //   - QQBotApprovalHandler 通过独立 WS 自行投递带 Inline Keyboard 的审批消息
+  //   - 用户点击按钮 → INTERACTION_CREATE → resolveApproval → gateway RPC
+  //   - /approve 文本命令作为 URGENT_COMMAND 直接入队交给框架处理
+  auth: {
+    authorizeActorAction: () => ({ authorized: true }),
+    getActionAvailabilityState: ({ accountId }: {
+      cfg: any; accountId?: string | null; action: "approve";
+    }) => {
+      return getApprovalHandler(accountId ?? "") != null
+        ? { kind: "enabled" as const }
+        : { kind: "disabled" as const };
+    },
+  },
+  approvals: {
+    delivery: {
+      hasConfiguredDmRoute: () => true,
+      shouldSuppressForwardingFallback: () => true,
+    },
+    render: {
+      exec: {
+        buildPendingPayload: () => null,
+        buildResolvedPayload: () => null,
+      },
+      plugin: {
+        buildPendingPayload: () => null,
+        buildResolvedPayload: () => null,
+      },
+    },
+  },
 };
+
+/** 与 `index.ts` / 文档一致的导出别名（实际实现为 `qqbotPlugin`） */
+export const umibotPlugin = qqbotPlugin;
+
+// ============ 独立的 mention 工具函数（供 gateway.ts 等直接调用） ============
+
+/** 清理 @mention：替换 <@openid> 为 @用户名，去除 @机器人自身 */
+export function stripMentionText(text: string, mentions?: Array<{ member_openid?: string; id?: string; user_openid?: string; is_you?: boolean; nickname?: string; username?: string }>): string {
+  if (!text || !mentions?.length) return text;
+  let cleaned = text;
+  for (const m of mentions) {
+    const openid = m.member_openid ?? m.id ?? m.user_openid;
+    if (!openid) continue;
+    if (m.is_you) {
+      cleaned = cleaned.replace(new RegExp(`<@!?${openid}>`, "g"), "").trim();
+    } else {
+      const displayName = m.nickname ?? m.username;
+      if (displayName) {
+        cleaned = cleaned.replace(new RegExp(`<@!?${openid}>`, "g"), `@${displayName}`);
+      }
+    }
+  }
+  return cleaned;
+}
+
+/** 检测消息是否 @了机器人（mentions > eventType > mentionPatterns） */
+export function detectWasMentioned({ eventType, mentions, content, mentionPatterns }: {
+  eventType?: string;
+  mentions?: Array<{ is_you?: boolean }>;
+  content?: string;
+  mentionPatterns?: string[];
+}): boolean {
+  if (mentions?.some((m) => m.is_you)) return true;
+  if (eventType === "GROUP_AT_MESSAGE_CREATE") return true;
+  if (mentionPatterns?.length && content) {
+    for (const pattern of mentionPatterns) {
+      try {
+        if (new RegExp(pattern, "i").test(content)) return true;
+      } catch {
+        // 无效正则，跳过
+      }
+    }
+  }
+  return false;
+}

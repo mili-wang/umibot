@@ -1,12 +1,28 @@
 import WebSocket from "ws";
 import path from "node:path";
-import type { ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent } from "./types.js";
-import { getAccessToken, getCachedCustomOrigin, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify, onMessageSent, PLUGIN_USER_AGENT } from "./api.js";
+import fs from "node:fs";
+import type { ResolvedQQBotAccount, WSPayload, C2CMessageEvent, GuildMessageEvent, GroupMessageEvent, InteractionEvent, MsgElement } from "./types.js";
+import { MSG_TYPE_QUOTE } from "./types.js";
+import { getAccessToken, getGatewayUrl, sendC2CMessage, sendChannelMessage, sendGroupMessage, clearTokenCache, initApiConfig, startBackgroundTokenRefresh, stopBackgroundTokenRefresh, sendC2CInputNotify, onMessageSent, getPluginUserAgent, sendProactiveGroupMessage, acknowledgeInteraction, getApiPluginVersion, setApiLogger, getCachedCustomOrigin } from "./api.js";
 import { loadSession, saveSession, clearSession } from "./session-store.js";
 import { recordKnownUser, flushKnownUsers } from "./known-users.js";
 import { getQQBotRuntime } from "./runtime.js";
-import { setRefIndex, getRefIndex, formatRefEntryForAgent, flushRefIndex, type RefAttachmentSummary } from "./ref-index-store.js";
-import { matchSlashCommand, type SlashCommandContext, type SlashCommandFileResult } from "./slash-commands.js";
+import { isGroupAllowed, resolveGroupName, resolveGroupPrompt, resolveHistoryLimit, resolveGroupPolicy, resolveGroupConfig, resolveIgnoreOtherMentions, resolveMentionPatterns } from "./config.js";
+import { qqbotPlugin, stripMentionText, detectWasMentioned } from "./channel.js";
+import { QQBotApprovalHandler, registerApprovalHandler, unregisterApprovalHandler, getApprovalHandler } from "./approval-handler.js";
+import {
+  recordPendingHistoryEntry,
+  buildPendingHistoryContext,
+  buildMergedMessageContext,
+  clearPendingHistory,
+  formatAttachmentTags,
+  formatMessageContent,
+  toAttachmentSummaries,
+  type HistoryEntry,
+} from "./group-history.js";
+
+import { setRefIndex, getRefIndex, formatRefEntryForAgent, formatMessageReferenceForAgent, flushRefIndex, type RefAttachmentSummary } from "./ref-index-store.js";
+import { matchSlashCommand, getFrameworkVersion, parseFrameworkDateVersion, type SlashCommandContext, type SlashCommandFileResult, type SlashCommandDelegateResult } from "./slash-commands.js";
 import { createMessageQueue, type QueuedMessage } from "./message-queue.js";
 import { triggerUpdateCheck } from "./update-checker.js";
 import { startImageServer, isImageServerRunning, type ImageServerConfig } from "./image-server.js";
@@ -23,6 +39,301 @@ import { parseAndSendMediaTags, sendPlainReply, type DeliverEventContext, type D
 import { createDeliverDebouncer, type DeliverDebouncer } from "./deliver-debounce.js";
 import { runWithRequestContext } from "./request-context.js";
 import { StreamingController, shouldUseStreaming } from "./streaming.js";
+import { resolveGroupMessageGate } from "./message-gating.js";
+
+// ============ Interaction 处理 ============
+
+/** 配置查询交互类型 */
+const INTERACTION_TYPE_CONFIG_QUERY = 2001;
+
+/** 配置更新交互类型 */
+const INTERACTION_TYPE_CONFIG_UPDATE = 2002;
+
+/** 处理 INTERACTION_CREATE 事件 */
+async function handleInteractionCreate(params: {
+  event: InteractionEvent;
+  account: ResolvedQQBotAccount;
+  cfg: unknown;
+  log?: { info: (msg: string) => void; warn?: (msg: string) => void; error: (msg: string) => void; debug?: (msg: string) => void };
+}): Promise<void> {
+  const { event, account, cfg, log } = params;
+  const token = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
+
+  if (event.data?.type === INTERACTION_TYPE_CONFIG_QUERY) {
+    // 从框架 configApi 读取最新配置（而非闭包中的旧 cfg），确保配置查询返回的数据与磁盘一致
+    const runtime = getQQBotRuntime();
+    const configApi = runtime.config as {
+      loadConfig: () => Record<string, unknown>;
+      writeConfigFile: (cfg: unknown) => Promise<void>;
+    };
+    const latestCfg = configApi.loadConfig() as Record<string, unknown>;
+
+    const groupOpenid = event.group_openid ?? "";
+    const groupCfg = groupOpenid ? resolveGroupConfig(latestCfg as any, groupOpenid, account.accountId) : null;
+    const groupPolicy = resolveGroupPolicy(latestCfg as any, account.accountId);
+    // require_mention 协议：字符串 "mention" | "always"（mention=@机器人时激活，always=总是激活）
+    const configRequireMention = groupCfg?.requireMention ?? true;
+    const requireMentionMode: GroupActivationMode = configRequireMention ? "mention" : "always";
+    const pluginVersion = getApiPluginVersion();
+    const fwVersionRaw = getFrameworkVersion();
+    const clawVer = parseFrameworkDateVersion(fwVersionRaw) ?? fwVersionRaw;
+
+    // 通过路由解析 agentId（与消息处理流程一致），用于 agent-aware 的 mentionPatterns
+    const interactionAgentId = groupOpenid
+      ? (runtime.channel?.routing?.resolveAgentRoute?.({
+          cfg: latestCfg,
+          channel: "umibot",
+          accountId: account.accountId,
+          peer: { kind: "group", id: groupOpenid },
+        }) as { agentId?: string } | undefined)?.agentId
+      : undefined;
+
+    // mention_patterns 协议：逗号分隔的字符串（@文本的名称提及BOT名，多个使用,分隔）
+    const mentionPatternsArr: string[] = resolveMentionPatterns(latestCfg as any, interactionAgentId);
+    const mentionPatterns = mentionPatternsArr.join(",");
+
+    const clawCfg = {
+      channel_type: "umibot",
+      channel_ver: pluginVersion,
+      claw_type: "openclaw",
+      claw_ver: clawVer,
+      require_mention: requireMentionMode,
+      group_policy: groupPolicy,
+      mention_patterns: mentionPatterns,
+      online_state: "online",
+    };
+
+    await acknowledgeInteraction(token, event.id, 0, { claw_cfg: clawCfg });
+    log?.info(`[umibot:${account.accountId}] Interaction ACK (type=${INTERACTION_TYPE_CONFIG_QUERY}) sent: ${event.id}, claw_cfg=${JSON.stringify(clawCfg)}`);
+  } else if (event.data?.type === INTERACTION_TYPE_CONFIG_UPDATE) {
+    // type=2002: 配置更新交互，从 resolved.claw_cfg 获取更新信息并写入本地配置
+    const resolved = event.data.resolved;
+    const clawCfgUpdate = (resolved as Record<string, unknown>)?.claw_cfg as Record<string, unknown> | undefined;
+    const groupOpenid = event.group_openid ?? "";
+
+    const runtime = getQQBotRuntime();
+    const configApi = runtime.config as {
+      loadConfig: () => Record<string, unknown>;
+      writeConfigFile: (cfg: unknown) => Promise<void>;
+    };
+
+    const currentCfg = structuredClone(configApi.loadConfig()) as Record<string, unknown>;
+    const umibot = ((currentCfg.channels ?? {}) as Record<string, unknown>).umibot as Record<string, unknown> | undefined;
+
+    let changed = false;
+
+    if (clawCfgUpdate) {
+      // 更新 require_mention（群级别）——协议为 "mention" | "always"，写回配置时转为 boolean
+      if (clawCfgUpdate.require_mention !== undefined && groupOpenid && umibot) {
+        const requireMentionBool = clawCfgUpdate.require_mention === "mention";
+        const accountId = account.accountId;
+        const isNamedAccount = accountId !== "default" && (umibot.accounts as Record<string, Record<string, unknown>> | undefined)?.[accountId];
+
+        if (isNamedAccount) {
+          const accounts = umibot.accounts as Record<string, Record<string, unknown>>;
+          const acct = accounts[accountId] ?? {};
+          const groups = (acct.groups ?? {}) as Record<string, Record<string, unknown>>;
+          groups[groupOpenid] = { ...groups[groupOpenid], requireMention: requireMentionBool };
+          acct.groups = groups;
+          accounts[accountId] = acct;
+          umibot.accounts = accounts;
+        } else {
+          const groups = (umibot.groups ?? {}) as Record<string, Record<string, unknown>>;
+          groups[groupOpenid] = { ...groups[groupOpenid], requireMention: requireMentionBool };
+          umibot.groups = groups;
+        }
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await configApi.writeConfigFile(currentCfg);
+      log?.info(`[umibot:${account.accountId}] Config updated via interaction ${event.id}: ${JSON.stringify({
+        require_mention: clawCfgUpdate?.require_mention,
+        group_openid: groupOpenid || undefined,
+      })}`);
+    }
+
+    // 无论更新是否成功，ACK 都上报最新的 claw_cfg 快照（写入后重新读取确保一致）
+    const latestCfg = changed ? (configApi.loadConfig() as Record<string, unknown>) : currentCfg;
+    const updatedGroupCfg = groupOpenid ? resolveGroupConfig(latestCfg as any, groupOpenid, account.accountId) : null;
+    const updatedRequireMention = updatedGroupCfg?.requireMention ?? true;
+    const updatedRequireMentionMode: GroupActivationMode = updatedRequireMention ? "mention" : "always";
+    const pluginVersion = getApiPluginVersion();
+    const fwVersionRaw = getFrameworkVersion();
+    const clawVer = parseFrameworkDateVersion(fwVersionRaw) ?? fwVersionRaw;
+
+    const ackClawCfg = {
+      channel_type: "umibot",
+      channel_ver: pluginVersion,
+      claw_type: "openclaw",
+      claw_ver: clawVer,
+      require_mention: updatedRequireMentionMode,
+      online_state: "online",
+    };
+
+    await acknowledgeInteraction(token, event.id, 0, { claw_cfg: ackClawCfg });
+    log?.info(`[umibot:${account.accountId}] Interaction ACK (type=${INTERACTION_TYPE_CONFIG_UPDATE}) sent: ${event.id}, claw_cfg=${JSON.stringify(ackClawCfg)}`);
+  } else {
+    // 普通按钮交互：先 ACK
+    await acknowledgeInteraction(token, event.id);
+    log?.debug?.(`[umibot:${account.accountId}] Interaction ACK sent: ${event.id}`);
+
+    // Inline Keyboard 审批按钮（type=1 Callback）
+    // button_data 格式：approve:<approvalId>:<decision>
+    // approvalId 可能是 "exec:uuid" / "plugin:uuid"（带前缀）或纯 "uuid"（无前缀）
+    const buttonData = event.data?.resolved?.button_data ?? "";
+    const m = buttonData.match(/^approve:((?:(?:exec|plugin):)?[0-9a-f-]+):(allow-once|allow-always|deny)$/i);
+    if (m) {
+      const approvalId = m[1]!;
+      const decision = m[2] as "allow-once" | "allow-always" | "deny";
+      const userId = event.group_member_openid || event.user_openid || event.data?.resolved?.user_id || "unknown";
+      log?.info(`[umibot:${account.accountId}] Approval button clicked: approvalId=${approvalId}, decision=${decision}, user=${userId}, buttonData=${buttonData}`);
+      const handler = getApprovalHandler(account.accountId);
+      if (handler) {
+        void handler.resolveApproval(approvalId, decision);
+      } else {
+        log?.error(`[umibot:${account.accountId}] Approval button: no handler found for accountId=${account.accountId}`);
+      }
+    }
+  }
+}
+
+// /activation 命令支持：读取 session store 中的 groupActivation 值
+// plugin-sdk 未导出 loadSessionStore，插件侧内联实现（只读）
+
+type GroupActivationMode = "mention" | "always";
+
+/** 解析 session store 文件路径 */
+function resolveSessionStorePath(cfg: Record<string, unknown>, agentId?: string): string {
+  const sessionCfg = (cfg as any)?.session;
+  const store: string | undefined = sessionCfg?.store;
+  const resolvedAgentId = agentId || "default";
+
+  if (store) {
+    let expanded = store;
+    if (expanded.includes("{agentId}")) {
+      expanded = expanded.replaceAll("{agentId}", resolvedAgentId);
+    }
+    if (expanded.startsWith("~")) {
+      const home = process.env.HOME || process.env.USERPROFILE || "";
+      expanded = expanded.replace(/^~/, home);
+    }
+    return path.resolve(expanded);
+  }
+
+  // 默认路径: ~/.openclaw/agents/{agentId}/sessions/sessions.json
+  const stateDir = process.env.OPENCLAW_STATE_DIR?.trim()
+    || process.env.CLAWDBOT_STATE_DIR?.trim()
+    || path.join(process.env.HOME || process.env.USERPROFILE || "", ".openclaw");
+  return path.join(stateDir, "agents", resolvedAgentId, "sessions", "sessions.json");
+}
+
+// ============ Mention Gating — 已抽取到 message-gating.ts ============
+
+// ============ Command Detection（委托框架运行时 commands-registry） ============
+
+/**
+ * 检测消息是否包含框架控制命令（如 /activation、/status 等）。
+ *
+ * 不再使用静态 KNOWN_CONTROL_COMMANDS 列表，而是委托给框架运行时
+ * pluginRuntime.channel.text.hasControlCommand()，确保框架新增命令时
+ * 无需手动同步。
+ *
+ * 如果 pluginRuntime 尚未初始化（极端边界），回退到简单的 "/" 前缀检测。
+ */
+function hasControlCommand(text: string): boolean {
+  if (!text || !text.startsWith("/")) return false;
+  try {
+    const runtime = getQQBotRuntime();
+    const runtimeHasControlCommand = runtime?.channel?.text?.hasControlCommand;
+    if (typeof runtimeHasControlCommand === "function") {
+      return runtimeHasControlCommand(text);
+    }
+  } catch {
+    // runtime 未初始化，fallback
+  }
+  // fallback：简单的 "/" + word 检测（宁可误判为 true 也不漏掉命令）
+  return /^\/[a-z][a-z0-9_-]*/i.test(text);
+}
+
+// ============ Text Command Gating ============
+
+/**
+ * 判断文本命令是否启用。
+ * 当 cfg.commands.text === false 时禁用；QQ Bot 仅支持文本命令（无 native slash command）。
+ */
+function shouldHandleTextCommands(cfg: Record<string, unknown>): boolean {
+  const commands = cfg.commands as { text?: boolean } | undefined;
+  // 仅当显式设置为 false 时禁用（默认启用）
+  return commands?.text !== false;
+}
+
+// ============ hasAnyMention 检测 ============
+
+/**
+ * 检测消息中是否包含任何 @mention（不限于 @bot）。
+ * 如果消息 @ 了任何人，即使是控制命令也不应该 bypass mention 门控。
+ */
+function hasAnyMention(params: {
+  mentions?: Array<{ is_you?: boolean; bot?: boolean; [key: string]: unknown }>;
+  content?: string;
+}): boolean {
+  // QQ 事件中 mentions 数组包含了消息中所有被 @ 的用户（含 bot）
+  if (params.mentions && params.mentions.length > 0) return true;
+  // 兜底：检查文本中是否有 <@xxx> 格式的 mention
+  if (params.content && /<@!?\w+>/.test(params.content)) return true;
+  return false;
+}
+
+// ============ implicitMention 检测 ============
+
+/**
+ * 检测引用回复是否构成隐式 mention。
+ * 如果用户回复的是 bot 发出的消息，视为隐式 mention。
+ */
+function resolveImplicitMention(params: {
+  refMsgIdx?: string;
+  getRefEntry: (idx: string) => { isBot?: boolean } | null;
+}): boolean {
+  if (!params.refMsgIdx) return false;
+  const refEntry = params.getRefEntry(params.refMsgIdx);
+  return refEntry?.isBot === true;
+}
+
+/**
+ * 解析 groupActivation（session store > 配置 requireMention > 默认值）
+ * @returns "mention" | "always"
+ */
+function resolveGroupActivation(params: {
+  cfg: Record<string, unknown>;
+  agentId: string;
+  sessionKey: string;
+  configRequireMention: boolean;
+}): GroupActivationMode {
+  const defaultActivation: GroupActivationMode = params.configRequireMention ? "mention" : "always";
+
+  try {
+    const storePath = resolveSessionStorePath(params.cfg, params.agentId);
+    if (!fs.existsSync(storePath)) {
+      return defaultActivation;
+    }
+    const raw = fs.readFileSync(storePath, "utf-8");
+    const store = JSON.parse(raw) as Record<string, { groupActivation?: string }>;
+    const entry = store[params.sessionKey];
+    if (!entry?.groupActivation) {
+      return defaultActivation;
+    }
+    const normalized = entry.groupActivation.trim().toLowerCase();
+    if (normalized === "mention" || normalized === "always") {
+      return normalized;
+    }
+    return defaultActivation;
+  } catch {
+    // session store 读取失败时 fallback 到配置文件
+    return defaultActivation;
+  }
+}
 
 // UMI Bot intents - 按权限级别分组
 const INTENTS = {
@@ -33,11 +344,12 @@ const INTENTS = {
   // 需要申请的权限
   DIRECT_MESSAGE: 1 << 12,           // 频道私信
   GROUP_AND_C2C: 1 << 25,            // 群聊和 C2C 私聊（需申请）
+  INTERACTION: 1 << 26,              // 按钮交互回调
 };
 
-// 固定使用完整权限（群聊 + 私信 + 频道），不做降级
-const FULL_INTENTS = INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE | INTENTS.GROUP_AND_C2C;
-const FULL_INTENTS_DESC = "群聊+私信+频道";
+// 固定使用完整权限（群聊 + 私信 + 频道 + 交互），不做降级
+const FULL_INTENTS = INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE | INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION;
+const FULL_INTENTS_DESC = "群聊+私信+频道+交互";
 
 // 重连配置
 const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000, 60000]; // 递增延迟
@@ -135,6 +447,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
   triggerUpdateCheck(log);
 
   // 初始化 API 配置（markdown 支持）
+  // 将框架 log 注入 api 模块，统一日志输出
+  if (log) {
+    setApiLogger(log);
+  }
   initApiConfig({
     markdownSupport: account.markdownSupport,
   });
@@ -260,7 +576,19 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     log?.info(`[umibot:${account.accountId}] Restored session from storage: sessionId=${sessionId}, lastSeq=${lastSeq}`);
   }
 
-  // ============ 按用户并发的消息队列 ============
+  // ============ 审批 Handler ============
+  const approvalHandler = new QQBotApprovalHandler({
+    accountId: account.accountId,
+    appId: account.appId,
+    clientSecret: account.clientSecret,
+    umi6Sn: account.umi6Sn,
+    cfg: cfg as any,
+    log,
+  });
+  registerApprovalHandler(account.accountId, approvalHandler);
+  void approvalHandler.start();
+
+  // ============ 消息队列（复用 createMessageQueue，内置群消息合并/淘汰策略） ============
   const msgQueue = createMessageQueue({
     accountId: account.accountId,
     log,
@@ -269,7 +597,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
   // 斜杠指令拦截：在入队前匹配插件级指令，命中则直接回复，不入队
   // 紧急命令列表：这些命令会立即执行，不进入斜杠匹配流程
-  const URGENT_COMMANDS = ["/stop"];
+  // /stop   — 停止当前 agent run，清空队列
+  // /approve — 审批决策，必须在 agent 等待审批时立即执行，否则死锁
+  const URGENT_COMMANDS = ["/stop", "/approve"];
 
   const trySlashCommandOrEnqueue = async (msg: QueuedMessage): Promise<void> => {
     const content = (msg.content ?? "").trim();
@@ -317,6 +647,16 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
       const reply = await matchSlashCommand(cmdCtx);
       if (reply === null) {
         // 不是插件级指令，正常入队交给框架
+        msgQueue.enqueue(msg);
+        return;
+      }
+
+      // 委托给 AI 模型：用加工后的 prompt 替换原始消息入队
+      const isDelegateResult = typeof reply === "object" && reply !== null && "delegatePrompt" in reply;
+      if (isDelegateResult) {
+        const delegatePrompt = (reply as SlashCommandDelegateResult).delegatePrompt;
+        log?.info(`[umibot:${account.accountId}] Slash command delegated to AI: ${content.slice(0, 40)}`);
+        msg.content = delegatePrompt;
         msgQueue.enqueue(msg);
         return;
       }
@@ -380,6 +720,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
     flushKnownUsers();
     // P1-4: 保存引用索引数据
     flushRefIndex();
+    // 停止审批 handler
+    void approvalHandler.stop();
+    unregisterApprovalHandler(account.accountId);
   });
 
   const cleanup = () => {
@@ -450,17 +793,22 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
       const ws = new WebSocket(gatewayUrl, {
         headers: {
           "Custom-Origin": customOrigin,
+          "User-Agent": getPluginUserAgent()
         },
       });
       currentWs = ws;
 
       const pluginRuntime = getQQBotRuntime();
 
+      // 群历史消息缓存：非@消息写入此 Map，被@时一次性注入上下文后清空
+      const groupHistories = new Map<string, HistoryEntry[]>();
+
       // 处理收到的消息
       const handleMessage = async (event: {
         type: "c2c" | "guild" | "dm" | "group";
         senderId: string;
         senderName?: string;
+        senderIsBot?: boolean;
         content: string;
         messageId: string;
         timestamp: string;
@@ -471,6 +819,12 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         attachments?: Array<{ content_type: string; url: string; filename?: string; voice_wav_url?: string; asr_refer_text?: string }>;
         refMsgIdx?: string;
         msgIdx?: string;
+        eventType?: string;
+        mentions?: Array<{ scope?: "all" | "single"; id?: string; user_openid?: string; member_openid?: string; username?: string; bot?: boolean; is_you?: boolean }>;
+        messageScene?: { source?: string; ext?: string[] };
+        msgElements?: MsgElement[];
+        /** 消息类型，参见 MSG_TYPE_* */
+        msgType?: number;
       }) => {
 
         log?.debug?.(`[umibot:${account.accountId}] Received message: ${JSON.stringify(event)}`);
@@ -579,9 +933,20 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         // 解析 UMI 表情标签，将 <faceType=...,ext="base64"> 替换为 【表情: 中文名】
         const parsedContent = parseFaceTags(event.content);
-        const userContent = voiceText
+        let userContent = voiceText
           ? (parsedContent.trim() ? `${parsedContent}\n${voiceText}` : voiceText) + attachmentInfo
           : parsedContent + attachmentInfo;
+
+        // 统一处理 <@member_openid> → @username / 移除 @bot mention
+        if (event.type === "group" && event.mentions?.length) {
+          userContent = stripMentionText(userContent, event.mentions as any) ?? userContent;
+        } else if (event.mentions?.length) {
+          for (const m of event.mentions) {
+            if (m.member_openid && m.username) {
+              userContent = userContent.replace(new RegExp(`<@${m.member_openid}>`, "g"), `@${m.username}`);
+            }
+          }
+        }
 
         // ============ 引用消息处理 ============
         let replyToId: string | undefined;
@@ -589,20 +954,32 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         let replyToSender: string | undefined;
         let replyToIsQuote = false;
 
-        // 1. 查找被引用消息
+        // 引用消息处理：优先使用本地 refIndex 缓存（同步、已处理），缓存未命中时从 msg_elements[0] 获取
+        // refMsgIdx 已由 parseRefIndices 在引用消息类型时合并了 msg_elements[0].msg_idx 的优先级
         if (event.refMsgIdx) {
           const refEntry = getRefIndex(event.refMsgIdx);
+          replyToId = event.refMsgIdx;
+          replyToIsQuote = true;
+
           if (refEntry) {
-            replyToId = event.refMsgIdx;
+            // 缓存命中：直接使用已处理好的内容（同步，无需再下载附件）
             replyToBody = formatRefEntryForAgent(refEntry);
             replyToSender = refEntry.senderName ?? refEntry.senderId;
-            replyToIsQuote = true;
-            log?.info(`[umibot:${account.accountId}] Quote detected: refMsgIdx=${event.refMsgIdx}, sender=${replyToSender}, content="${replyToBody.slice(0, 80)}..."`);
+            log?.info(`[umibot:${account.accountId}] Quote detected via refMsgIdx cache: refMsgIdx=${event.refMsgIdx}, sender=${replyToSender}, content="${replyToBody.slice(0, 80)}..."`);
+          } else if (event.msgType === MSG_TYPE_QUOTE) {
+            // 缓存未命中且为引用消息类型，从 msg_elements[0] 获取被引用消息内容
+            const refElement = event.msgElements?.[0];
+            if (refElement) {
+              const refData = { content: refElement.content ?? "", attachments: refElement.attachments };
+              replyToBody = await formatMessageReferenceForAgent(refData, { appId: account.appId, peerId, cfg, log });
+              log?.info(`[umibot:${account.accountId}] Quote detected via msg_elements[0] (cache miss): id=${replyToId}, sender=${replyToSender ?? "unknown"}, content="${(replyToBody ?? "").slice(0, 80)}..."`);
+            } else {
+              // 引用消息但 msg_elements 为空：AI 只能知道"用户引用了一条消息"
+              log?.info(`[umibot:${account.accountId}] Quote detected (MSG_TYPE_QUOTE) but no msg_elements: refMsgIdx=${event.refMsgIdx}`);
+            }
           } else {
-            log?.info(`[umibot:${account.accountId}] Quote detected but refMsgIdx not in cache: ${event.refMsgIdx}`);
-            replyToId = event.refMsgIdx;
-            replyToIsQuote = true;
-            // 缓存未命中时 replyToBody 为空，AI 只能知道"用户引用了一条消息"
+            // 缓存未命中且非引用消息类型：AI 只能知道"用户引用了一条消息"
+            log?.info(`[umibot:${account.accountId}] Quote detected but no cache and msgType=${event.msgType} (not quote): refMsgIdx=${event.refMsgIdx}`);
           }
         }
 
@@ -689,8 +1066,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         }
 
         // ============ 构建 contextInfo（静态/动态分离） ============
-        // 设计原则（参考 Telegram/Discord 做法）：
-        //   - 静态指引：每条消息不变的能力声明，
+        // 设计原则：
+        //   - 静态指引：每条消息不变的内容（场景锚定、投递地址、能力说明），
         //     注入 systemPrompts 前部，session 中虽重复出现但 AI 会自动降权，
         //     且保证长 session 窗口截断后仍可见。
         //   - 动态标签：每条消息变化的数据（时间、附件、ASR），
@@ -710,7 +1087,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           systemPrompts.unshift(staticInstruction);
         }
 
-        // --- 动态上下文（仅框架信封未覆盖的附件信息） ---
+        // --- 动态上下文 ---
         const dynLines: string[] = [];
         if (imageUrls.length > 0) {
           dynLines.push(`- 图片: ${imageUrls.join(", ")}`);
@@ -721,30 +1098,261 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         if (uniqueVoiceAsrReferTexts.length > 0) {
           dynLines.push(`- ASR: ${uniqueVoiceAsrReferTexts.join(" | ")}`);
         }
-        const dynamicCtx = dynLines.length > 0 ? dynLines.join("\n") + "\n" : "";
+        const dynamicCtx = dynLines.length > 0 ? dynLines.join("\n") + "\n\n" : "";
 
-        // 命令直接透传，不注入上下文
-        const userMessage = `${quotePart}${userContent}`;
-        const agentBody = userContent.startsWith("/")
+        // --- 命令授权（所有消息类型共用，群消息门控也需要） ---
+        // allowFrom: ["*"] 表示允许所有人，否则检查 senderId 是否在 allowFrom 列表中
+        const allowFromList = account.config?.allowFrom ?? [];
+        const allowAll = allowFromList.length === 0 || allowFromList.some((entry: string) => entry === "*");
+        const commandAuthorized = allowAll || allowFromList.some((entry: string) =>
+          entry.toUpperCase() === event.senderId.toUpperCase()
+        );
+
+        // --- 群消息上下文：插件只提供策略，框架自动组装 hint ---
+        let groupSystemPrompt = "";
+        let wasMentioned = false;
+        let groupSubject = "";
+        let senderLabel = "";
+
+        if (event.type === "group" && event.groupOpenid) {
+          // 1. 群策略检查（直接用 config 工具函数，与 Discord 的 allow-list.ts 同理）
+          if (!isGroupAllowed(cfg as any, event.groupOpenid, account.accountId)) {
+            log?.info(`[umibot:${account.accountId}] Group ${event.groupOpenid} not allowed by groupPolicy, skipping`);
+            return;
+          }
+
+          // 2. @检测（委托 mentions 适配器）
+          const mentionPatternsForDetect: string[] = resolveMentionPatterns(cfg as any, route.agentId);
+          wasMentioned = detectWasMentioned({
+            eventType: event.eventType,
+            mentions: event.mentions,
+            content: event.content,
+            mentionPatterns: mentionPatternsForDetect,
+          });
+
+          // 3. requireMention 门控
+          // 优先级：session store 中的 /activation 命令 > 配置文件 requireMention > 默认值
+          // 未被 @ 时：消息仍写入上下文（让 bot 拥有完整对话记忆），但不触发 AI 回复
+          const configRequireMention = qqbotPlugin.groups?.resolveRequireMention?.({
+            cfg: cfg as any,
+            accountId: account.accountId,
+            groupId: event.groupOpenid,
+          }) ?? true;
+
+          const activation = resolveGroupActivation({
+            cfg: cfg as any,
+            agentId: route.agentId,
+            sessionKey: route.sessionKey,
+            configRequireMention,
+          });
+          const requireMention = activation === "mention";
+
+          // 4. 隐式 mention：引用回复 bot 的消息视为隐式 mention
+          const implicitMention = resolveImplicitMention({
+            refMsgIdx: event.refMsgIdx,
+            getRefEntry: getRefIndex,
+          });
+
+          // 4.5 统一门控：ignoreOtherMentions → shouldBlock → mention 门控
+          // 三层判断收敛到 resolveGroupMessageGate()
+          const contentForCommand = event.content?.trim() ?? "";
+          const allowTextCommands = shouldHandleTextCommands(cfg as Record<string, unknown>);
+          const gate = resolveGroupMessageGate({
+            ignoreOtherMentions: resolveIgnoreOtherMentions(cfg as any, event.groupOpenid, account.accountId),
+            hasAnyMention: hasAnyMention({ mentions: event.mentions, content: event.content }),
+            wasMentioned,
+            implicitMention,
+            allowTextCommands,
+            isControlCommand: hasControlCommand(contentForCommand),
+            commandAuthorized,
+            requireMention,
+            canDetectMention: true,
+          });
+
+          if (gate.action === "drop_other_mention") {
+            // @了其他人但未 @bot：记录历史后丢弃
+            const historyLimit = resolveHistoryLimit(cfg as any, event.groupOpenid, account.accountId);
+            const senderForHistory = event.senderName
+              ? `${event.senderName} (${event.senderId})`
+              : event.senderId;
+            const historyAttachments = toAttachmentSummaries(event.attachments);
+            recordPendingHistoryEntry({
+              historyMap: groupHistories,
+              historyKey: event.groupOpenid,
+              limit: historyLimit,
+              entry: {
+                sender: senderForHistory,
+                body: userContent,
+                timestamp: new Date(event.timestamp).getTime(),
+                messageId: event.messageId,
+                attachments: historyAttachments,
+              },
+            });
+            log?.info(`[umibot:${account.accountId}] Group ${event.groupOpenid}: drop message (ignoreOtherMentions=true, other user mentioned, bot not mentioned)`);
+            return;
+          }
+
+          if (gate.action === "block_unauthorized_command") {
+            // 未授权控制命令：静默拦截，不交给 AI
+            log?.info(`[umibot:${account.accountId}] Group ${event.groupOpenid}: blocked unauthorized control command from ${event.senderId}: ${contentForCommand.slice(0, 50)}`);
+            return;
+          }
+
+          if (gate.action === "skip_no_mention") {
+            // 非 @bot 消息：记录到群历史缓存后跳过 AI
+            const historyLimit = resolveHistoryLimit(cfg as any, event.groupOpenid, account.accountId);
+            const senderForHistory = event.senderName
+              ? `${event.senderName} (${event.senderId})`
+              : event.senderId;
+            const historyAttachments = toAttachmentSummaries(event.attachments);
+            recordPendingHistoryEntry({
+              historyMap: groupHistories,
+              historyKey: event.groupOpenid,
+              limit: historyLimit,
+              entry: {
+                sender: senderForHistory,
+                body: userContent,
+                timestamp: new Date(event.timestamp).getTime(),
+                messageId: event.messageId,
+                attachments: historyAttachments,
+              },
+            });
+            log?.info(`[umibot:${account.accountId}] Group ${event.groupOpenid}: activation=${activation} (configRequireMention=${configRequireMention}) not mentioned, recorded to history (limit=${historyLimit}, cached=${(groupHistories.get(event.groupOpenid) ?? []).length}${historyAttachments ? `, attachments=${historyAttachments.length}` : ""})`);
+            return;
+          }
+
+          // gate.action === "pass" — 更新 wasMentioned 为 effectiveWasMentioned（含 implicit + bypass）
+          wasMentioned = gate.effectiveWasMentioned;
+
+          // 5. 发送者标签
+          senderLabel = event.senderName
+            ? `${event.senderName} (${event.senderId})`
+            : event.senderId;
+
+          // 6. 群名称（从 config 中读取，fallback 为 openid 前 8 位）
+          groupSubject = resolveGroupName(cfg as any, event.groupOpenid, account.accountId);
+
+          // 7. GroupSystemPrompt — 根据消息来源（机器人/人类）和 @状态 注入差异化 PE
+          //    基础提示从 resolveGroupIntroHint 获取（群名称、平台限制等静态信息），
+          //    然后根据运行时状态追加针对性行为指引。
+          const baseHint = qqbotPlugin.groups?.resolveGroupIntroHint?.({
+            cfg: cfg as any,
+            accountId: account.accountId,
+            groupId: event.groupOpenid,
+          }) ?? "";
+
+          let behaviorPrompt = "";
+
+          // 从配置读取群行为 PE
+          behaviorPrompt = resolveGroupPrompt(cfg as any, event.groupOpenid, account.accountId);
+
+          groupSystemPrompt = [baseHint, behaviorPrompt].filter(Boolean).join("\n");
+        }
+
+        const mergedCount = (event as QueuedMessage)._mergedCount;
+
+        // 群消息 user prompt 带上发送者昵称（合并消息已内嵌发送者前缀，不再重复添加）
+        const isMergedMsg = mergedCount && mergedCount > 1;
+        const senderPrefix = (event.type === "group" && !isMergedMsg)
+          ? `[${event.senderName ? `${event.senderName} (${event.senderId})` : event.senderId}] `
+          : "";
+        const isAtYouTag = event.type === "group"
+          ? (wasMentioned ? " (@你)" : "")
+          : "";
+
+        // 合并消息：前面的消息用 envelope 历史格式，最后一条用当前消息格式（与 mention 单条回复对齐）
+        // BodyForAgent 只包含动态上下文 + 用户消息，不拼入 systemPrompts。
+        // systemPrompts（[UMIBot] to=...、TTS 能力声明等）通过 GroupSystemPrompt 注入到
+        // 框架的 extraSystemPrompt 中，不会存入 transcript 的 user turn content，
+        // 避免 Web UI 不显示用户 query 的问题。
+        let userMessage: string;
+        const mergedMessages = (event as QueuedMessage)._mergedMessages;
+        if (isMergedMsg && mergedMessages?.length) {
+          // --- 辅助：格式化单条子消息内容（表情解析 + mention 清理 + 附件标签） ---
+          const formatSubMsgContent = (m: QueuedMessage): string =>
+            formatMessageContent({
+              content: m.content ?? "",
+              chatType: m.type,
+              mentions: m.mentions as unknown[],
+              attachments: m.attachments,
+              parseFaceTags,
+              stripMentionText: (text, mentions) =>
+                stripMentionText(text, mentions as any) ?? text,
+            });
+
+          // 前面的消息使用 envelope 历史格式
+          const preceding = mergedMessages.slice(0, -1);
+          const lastMsg = mergedMessages[mergedMessages.length - 1];
+
+          const envelopeParts = preceding.map((m) => {
+            const msgContent = formatSubMsgContent(m);
+            const senderName = m.senderName
+              ? (m.senderName.includes(m.senderId) ? m.senderName : `${m.senderName} (${m.senderId})`)
+              : m.senderId;
+            return pluginRuntime.channel.reply.formatInboundEnvelope({
+              channel: "umibot",
+              from: senderName,
+              timestamp: new Date(m.timestamp).getTime(),
+              body: msgContent,
+              chatType: "group",
+              envelope: envelopeOptions,
+            });
+          });
+
+          // 最后一条消息使用简洁格式：[发送者]: 内容 (@你)
+          const lastContent = formatSubMsgContent(lastMsg);
+          const lastSenderName = lastMsg.senderName
+            ? (lastMsg.senderName.includes(lastMsg.senderId) ? lastMsg.senderName : `${lastMsg.senderName} (${lastMsg.senderId})`)
+            : lastMsg.senderId;
+          const lastPart = `[${lastSenderName}] ${lastContent}${isAtYouTag}`;
+
+          // 前置消息用段落标签包裹（类似引用消息的 [引用消息开始]...[引用消息结束]）
+          userMessage = buildMergedMessageContext({
+            precedingParts: envelopeParts,
+            currentMessage: lastPart,
+          });
+        } else {
+          // 命令直接透传，不注入上下文
+          userMessage = senderPrefix ? `${senderPrefix}${quotePart}${userContent}${isAtYouTag}` : `${quotePart}${userContent}`;
+        }
+        let agentBody = userContent.startsWith("/")
           ? userContent
-          : `${systemPrompts.join("\n")}\n\n${dynamicCtx}${userMessage}`;
-        
+          : `${dynamicCtx}${userMessage}`;
+
+        // 被@时：将累积的非@历史消息注入上下文
+        // 消息格式使用 formatInboundEnvelope 与正常消息保持一致
+        if (event.type === "group" && event.groupOpenid) {
+          const historyLimit = resolveHistoryLimit(cfg as any, event.groupOpenid, account.accountId);
+          const envelopeOpts = pluginRuntime.channel.reply.resolveEnvelopeFormatOptions(cfg);
+          agentBody = buildPendingHistoryContext({
+            historyMap: groupHistories,
+            historyKey: event.groupOpenid,
+            limit: historyLimit,
+            currentMessage: agentBody,
+            formatEntry: (entry) => {
+              // 将附件描述追加到消息 body 末尾，确保富媒体上下文不丢失
+              const attachmentDesc = formatAttachmentTags(entry.attachments);
+              const bodyWithAttachments = attachmentDesc
+                ? `${entry.body} ${attachmentDesc}`
+                : entry.body;
+              return pluginRuntime.channel.reply.formatInboundEnvelope({
+                channel: "umibot",
+                from: entry.sender,
+                timestamp: entry.timestamp,
+                body: bodyWithAttachments,
+                chatType: "group",
+                envelope: envelopeOpts,
+              });
+            },
+          });
+        }
+
         log?.info(`[umibot:${account.accountId}] agentBody length: ${agentBody.length}`);
-        // 日志：输出送给大模型的完整 JSON
-        log?.info(`[umibot:${account.accountId}] ▶ AGENT BODY FULL: ${agentBody}`);
 
         const fromAddress = event.type === "guild" ? `umibot:channel:${event.channelId}`
                          : event.type === "group" ? `umibot:group:${event.groupOpenid}`
                          : `umibot:${event.senderId}`;
         const toAddress = fromAddress;
-
-        // 计算命令授权状态
-        // allowFrom: ["*"] 表示允许所有人，否则检查 senderId 是否在 allowFrom 列表中
-        const allowFromList = account.config?.allowFrom ?? [];
-        const allowAll = allowFromList.length === 0 || allowFromList.some((entry: string) => entry === "*");
-        const commandAuthorized = allowAll || allowFromList.some((entry: string) => 
-          entry.toUpperCase() === event.senderId.toUpperCase()
-        );
 
         // 分离 imageUrls 为本地路径和远程 URL，供 openclaw 原生媒体处理
         const localMediaPaths: string[] = [];
@@ -763,6 +1371,12 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           }
         }
 
+        // UMIBot 静态系统提示（投递地址、TTS 能力等）合并到 GroupSystemPrompt，
+        // 通过框架的 extraSystemPrompt 机制注入 AI system prompt，
+        // 不会存入 transcript 的 user turn content。
+        const qqbotSystemInstruction = systemPrompts.length > 0 ? systemPrompts.join("\n") : "";
+        const mergedGroupSystemPrompt = [qqbotSystemInstruction, groupSystemPrompt].filter(Boolean).join("\n") || undefined;
+
         const ctxPayload = pluginRuntime.channel.reply.finalizeInboundContext({
           Body: body,
           BodyForAgent: agentBody,
@@ -773,6 +1387,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           SessionKey: route.sessionKey,
           AccountId: route.accountId,
           ChatType: isGroupChat ? "group" : "direct",
+          GroupSystemPrompt: mergedGroupSystemPrompt,
+          // 群消息元数据（框架级字段）
+          WasMentioned: isGroupChat ? wasMentioned : undefined,
+          SenderLabel: isGroupChat ? senderLabel : undefined,
+          GroupSubject: isGroupChat ? groupSubject : undefined,
           SenderId: event.senderId,
           SenderName: event.senderName,
           Provider: "umibot",
@@ -802,7 +1421,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             MediaUrls: remoteMediaUrls,
             MediaUrl: remoteMediaUrls[0],
           } : {}),
-          // 引用消息上下文（对齐 Telegram/Discord 的 ReplyTo 字段）
+          // 引用消息上下文
           ...(replyToId ? {
             ReplyToId: replyToId,
             ReplyToBody: replyToBody,
@@ -831,7 +1450,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         // 使用 AsyncLocalStorage 建立请求级上下文，作用域内所有异步代码
         // （包括 AI agent 调用、tool execute）都能安全获取当前会话信息，无并发竞态。
-        await runWithRequestContext({ target: qualifiedTarget }, async () => {
+        await runWithRequestContext({ target: qualifiedTarget, accountId: account.accountId }, async () => {
         try {
           const messagesConfig = pluginRuntime.channel.reply.resolveEffectiveMessagesConfig(cfg, route.agentId);
 
@@ -913,9 +1532,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
           log?.info(`[umibot:${account.accountId}] Streaming ${useStreaming ? "enabled" : "disabled"} for ${targetType} message from ${event.senderId}`);
           let streamingController: StreamingController | null = null;
 
-          /** 创建一个新的 StreamingController 实例（用于初始创建和回复边界时重建） */
-          const createStreamingController = (): StreamingController => {
-            const ctrl = new StreamingController({
+          if (useStreaming) {
+            log?.info(`[umibot:${account.accountId}] Streaming mode enabled for ${targetType} target`);
+            streamingController = new StreamingController({
               account,
               userId: event.senderId,
               replyToMsgId: event.messageId,
@@ -934,23 +1553,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 },
                 log,
               },
-              // 回复边界回调：终结旧 controller 后创建新的，用新回复文本继续流式
-              onReplyBoundary: async (newReplyText: string) => {
-                log?.info(`[umibot:${account.accountId}] Reply boundary: creating new StreamingController for new reply`);
-                const newCtrl = createStreamingController();
-                streamingController = newCtrl;
-                // 将新回复的初始文本交给新 controller 处理
-                await newCtrl.onPartialReply({ text: newReplyText });
-              },
             });
-            return ctrl;
-          };
-
-          if (useStreaming) {
-            log?.info(`[umibot:${account.accountId}] Streaming mode enabled for ${targetType} target`);
-            streamingController = createStreamingController();
           }
-
 
           const dispatchPromise = pluginRuntime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
             ctx: ctxPayload,
@@ -1074,6 +1678,16 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     // StreamingController 内部已有重试，这里只打日志
                     log?.error(`[umibot:${account.accountId}] Streaming deliver error: ${err}`);
                   }
+
+                let replyText = payload.text ?? "";
+                
+                // 群消息：模型回复 NO_REPLY 表示无需回复，跳过发送
+                // 注意：核心框架的 reply-delivery 已会拦截 NO_REPLY，此处为双重保险
+                const trimmedReply = replyText.trim();
+                if (event.type === "group" && (trimmedReply === "NO_REPLY" || trimmedReply === "[SKIP]")) {
+                  log?.info(`[umibot:${account.accountId}] Model decided to skip group message (token=${trimmedReply}) from ${event.senderId}: ${event.content?.slice(0, 50)}`);
+                  return;
+                }
 
                   // 检查是否因流式 API 不可用而需要降级（ensureStreamingStarted 全部失败）
                   // 如果需要降级，不 return，让本次 deliver 的 payload.text（全量文本）继续走普通发送逻辑
@@ -1242,9 +1856,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             if (timeoutId) {
               clearTimeout(timeoutId);
             }
-            if (!hasResponse) {
-              log?.error(`[umibot:${account.accountId}] No response within timeout`);
-            }
+            log?.error(`[umibot:${account.accountId}] Dispatch failed: ${err}${!hasResponse ? " (no response received)" : ""}`);
+
           } finally {
             // 清理 tool-only 兜底定时器
             if (toolOnlyTimeoutId) {
@@ -1283,6 +1896,16 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             // （每次 deliver 收到的都是全量文本，不需要在 controller 内部保存累积文本）
             if (streamingController?.shouldFallbackToStatic) {
               log?.debug?.(`[umibot:${account.accountId}] Streaming was degraded to static mode (no chunk sent successfully)`);
+            }
+
+            // 回复完成后清空群历史缓存（每次回复后重新累积）
+            if (event.type === "group" && event.groupOpenid) {
+              const historyLimit = resolveHistoryLimit(cfg as any, event.groupOpenid, account.accountId);
+              clearPendingHistory({
+                historyMap: groupHistories,
+                historyKey: event.groupOpenid,
+                limit: historyLimit,
+              });
             }
           }
         } catch (err) {
@@ -1426,7 +2049,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   accountId: account.accountId,
                 });
                 // 解析引用索引
-                const c2cRefs = parseRefIndices(event.message_scene?.ext);
+                const c2cRefs = parseRefIndices(event.message_scene?.ext, event.message_type, event.msg_elements);
                 // 斜杠指令拦截 → 不匹配则入队
                 trySlashCommandOrEnqueue({
                   type: "c2c",
@@ -1437,7 +2060,9 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   attachments: event.attachments,
                   refMsgIdx: c2cRefs.refMsgIdx,
                   msgIdx: c2cRefs.msgIdx,
-                  room_id: event.room_id
+                  room_id: event.room_id,
+                  msgElements: event.msg_elements,
+                  msgType: event.message_type,
                 });
               } else if (t === "AT_MESSAGE_CREATE") {
                 const event = d as GuildMessageEvent;
@@ -1448,7 +2073,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   nickname: event.author.username,
                   accountId: account.accountId,
                 });
-                const guildRefs = parseRefIndices((event as any).message_scene?.ext);
+                const guildRefs = parseRefIndices((event as any).message_scene?.ext, (event as any).message_type, (event as any).msg_elements);
                 trySlashCommandOrEnqueue({
                   type: "guild",
                   senderId: event.uuid,
@@ -1461,6 +2086,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   attachments: event.attachments,
                   refMsgIdx: guildRefs.refMsgIdx,
                   msgIdx: guildRefs.msgIdx,
+                  msgType: (event as any).message_type,
                 });
               } else if (t === "DIRECT_MESSAGE_CREATE") {
                 const event = d as GuildMessageEvent;
@@ -1471,7 +2097,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   nickname: event.author.username,
                   accountId: account.accountId,
                 });
-                const dmRefs = parseRefIndices((event as any).message_scene?.ext);
+                const dmRefs = parseRefIndices((event as any).message_scene?.ext, (event as any).message_type, (event as any).msg_elements);
                 trySlashCommandOrEnqueue({
                   type: "dm",
                   senderId: event.author.id,
@@ -1483,20 +2109,51 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   attachments: event.attachments,
                   refMsgIdx: dmRefs.refMsgIdx,
                   msgIdx: dmRefs.msgIdx,
+                  msgType: (event as any).message_type,
                 });
               } else if (t === "GROUP_AT_MESSAGE_CREATE") {
                 const event = d as GroupMessageEvent;
-                // P1-3: 记录已知用户（群组用户）
+                // 被 @ 的消息，直接入队回复
                 recordKnownUser({
                   openid: event.author.member_openid,
                   type: "group",
+                  nickname: event.author.username,
                   groupOpenid: event.group_openid,
                   accountId: account.accountId,
                 });
-                const groupRefs = parseRefIndices(event.message_scene?.ext);
+                const groupRefs = parseRefIndices(event.message_scene?.ext, event.message_type, event.msg_elements);
                 trySlashCommandOrEnqueue({
                   type: "group",
                   senderId: event.author.member_openid,
+                  senderName: event.author.username,
+                  content: event.content,
+                  messageId: event.id, 
+                  timestamp: event.timestamp,
+                  groupOpenid: event.group_openid,
+                  attachments: event.attachments,
+                  refMsgIdx: groupRefs.refMsgIdx,
+                  msgIdx: groupRefs.msgIdx,
+                  eventType: "GROUP_AT_MESSAGE_CREATE",
+                  mentions: event.mentions,
+                  messageScene: event.message_scene,
+                  msgElements: event.msg_elements,
+                  msgType: event.message_type,
+                });
+              } else if (t === "GROUP_MESSAGE_CREATE") {
+                const event = d as GroupMessageEvent;
+                recordKnownUser({
+                  openid: event.author.member_openid,
+                  type: "group",
+                  nickname: event.author.username,
+                  groupOpenid: event.group_openid,
+                  accountId: account.accountId,
+                });
+                const groupRefs = parseRefIndices(event.message_scene?.ext, event.message_type, event.msg_elements);
+                trySlashCommandOrEnqueue({
+                  type: "group",
+                  senderId: event.author.member_openid,
+                  senderName: event.author.username,
+                  senderIsBot: event.author.bot,
                   content: event.content,
                   messageId: event.id,
                   timestamp: event.timestamp,
@@ -1504,6 +2161,39 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   attachments: event.attachments,
                   refMsgIdx: groupRefs.refMsgIdx,
                   msgIdx: groupRefs.msgIdx,
+                  eventType: "GROUP_MESSAGE_CREATE",
+                  mentions: event.mentions,
+                  messageScene: event.message_scene,
+                  msgElements: event.msg_elements,
+                  msgType: event.message_type,
+                });
+              } else if (t === "GROUP_ADD_ROBOT") {
+                const event = d as { timestamp: string; group_openid: string; op_member_openid: string };
+                log?.info(`[umibot:${account.accountId}] Bot added to group: ${event.group_openid} by ${event.op_member_openid}`);
+                recordKnownUser({
+                  openid: event.op_member_openid,
+                  type: "group",
+                  groupOpenid: event.group_openid,
+                  accountId: account.accountId,
+                });
+
+              } else if (t === "GROUP_DEL_ROBOT") {
+                const event = d as { timestamp: string; group_openid: string; op_member_openid: string };
+                log?.info(`[umibot:${account.accountId}] Bot removed from group: ${event.group_openid} by ${event.op_member_openid}`);
+              } else if (t === "GROUP_MSG_REJECT") {
+                const event = d as { timestamp: number; group_openid: string; op_member_openid: string };
+                log?.info(`[umibot:${account.accountId}] Group ${event.group_openid} rejected bot proactive messages (by ${event.op_member_openid})`);
+              } else if (t === "GROUP_MSG_RECEIVE") {
+                const event = d as { timestamp: number; group_openid: string; op_member_openid: string };
+                log?.info(`[umibot:${account.accountId}] Group ${event.group_openid} accepted bot proactive messages (by ${event.op_member_openid})`);
+              } else if (t === "INTERACTION_CREATE") {
+                const event = d as InteractionEvent;
+                const resolved = event.data?.resolved;
+                const sceneDesc = event.scene ?? (event.chat_type === 0 ? "guild" : event.chat_type === 1 ? "group" : "c2c");
+                log?.info(`[umibot:${account.accountId}] Interaction: scene=${sceneDesc}, type=${event.data?.type}, button_id=${resolved?.button_id}, button_data=${resolved?.button_data}, user=${event.group_member_openid || event.user_openid || resolved?.user_id || "unknown"}`);
+
+                handleInteractionCreate({ event, account, cfg, log }).catch((err) => {
+                  log?.error(`[umibot:${account.accountId}] Failed to handle interaction ${event.id}: ${err}`);
                 });
               }
               break;

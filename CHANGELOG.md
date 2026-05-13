@@ -4,6 +4,82 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.1] - 2026-04-10
+
+### Fixed
+
+- **Upgrade script adapted for OpenClaw 2026.4.9**:
+  - Fixed standalone plugin installation failure.
+  - Fixed compatibility issues between the standalone and built-in plugin.
+  - Added automatic channel config repair for `additional properties` validation errors.
+
+### ⚠️ OpenClaw 2026.4.5 Notice
+
+OpenClaw 2026.4.5 introduced strict validation for channel configurations. New config fields added by the standalone plugin — such as streaming output and group chat settings — are rejected as illegal properties, preventing the gateway from starting. The upgrade script now automatically backs up the original config and removes unrecognized fields to restore startup. If you need standalone-plugin-exclusive features like streaming output and group chat, downgrade OpenClaw to **2026.4.2 or earlier**.
+
+## [1.7.1] - 2026-04-03
+
+### Added
+
+- **Command Execution Approval**: Before the AI executes a command, an approval request with Inline Keyboard buttons (✅ Allow Once / ⭐ Always Allow / ❌ Deny) is sent via QQ message. Users can approve or deny by tapping a button. Supports both C2C and group chat scenarios.
+- **`/bot-approve` Command**: New slash command for managing approval configuration — supports `on` (allowlist mode), `off` (disable approval), `always` (strict mode), `reset` (restore defaults), and `status` (view current config).
+
+## [1.7.0] - 2026-04-02
+
+### Added
+
+- **Message Reference Improvements**: Supports parsing the new quoted-message field in QQ message events — quoted context now works across devices, enabling the AI to understand which message a user is replying to and deliver more contextually coherent responses.
+- **`umibot-upgrade` Skill**: New guided upgrade Skill that supports natural-language version update requests; improved Skill upgrade interaction flow.
+
+### Fixed
+
+- **Windows file path encoding**: Fixed a path encoding issue on Windows that prevented files from being sent correctly.
+
+### Changed
+
+- **Upgrade script refactor v4**: Rebuilt the downgrade architecture for compatibility with OpenClaw 2026.3.31+, improving upgrade stability and reliability.
+
+### ⚠️ Important: Built-in Plugin Conflict in OpenClaw 2026.3.31
+
+Starting from OpenClaw 2026.3.31, a built-in UMIBot plugin is included. Upgrading OpenClaw directly to the latest version without taking action may cause conflicts with this plugin, resulting in new features such as message reference parsing and large file uploads being unavailable.
+
+**Resolution (choose one):**
+
+**Option 1: Upgrade this plugin to the latest version** (recommended)
+
+This release includes built-in conflict handling and will automatically take priority after upgrade:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-umibot/main/scripts/upgrade-via-npm.sh | bash
+```
+
+**Option 2: Disable the built-in plugin via config**
+
+Disable the OpenClaw built-in UMIBot plugin with the following command:
+
+```bash
+openclaw config set plugins.entries.umibot.enabled false
+```
+
+## [1.6.7] - 2026-03-30
+
+### Fixed
+
+- **Multi-account reminder delivery failure**: Fixed missing `accountId` in cron job delivery, causing reminders to fail sending through the correct bot account in multi-account setups. `accountId` is now required, using `getRequestAccountId() || "default"` to ensure it's never empty; delivery structure moved to job top level.
+- **Upgrade scripts & `/bot-upgrade` improvements**: Fixed `--version` argument parsing logic, improved version check flow; upgrade scripts (npm/source) enhanced for better compatibility.
+- **`postinstall-link-sdk` script optimization**: Improved robustness of the post-install SDK linking script.
+
+### Upgrade
+
+Run the following command to upgrade to the latest version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-umibot/main/scripts/upgrade-via-npm.sh | bash
+```
+
+> ⚠️ v1.6.6 and below do not support hot upgrade via `/bot-upgrade`. Please use the command above to upgrade.
+
+
 ## [1.6.6] - 2026-03-26
 
 ### Added

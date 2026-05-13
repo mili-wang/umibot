@@ -9,7 +9,7 @@
 
 **让你的 AI 助手接入 UMI — 私聊、群聊、富媒体，一个插件全搞定。**
 
-### 🚀 当前版本： `v1.6.6`
+### 🚀 当前版本： `v1.7.1`
 
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![UMI Bot](https://img.shields.io/badge/QQ_Bot-API_v2-red)](https://bot.q.umi.com/wiki/)
@@ -21,7 +21,7 @@
 
 扫描二维码加入群聊，一起交流
 
-<img width="400" alt="UMI 群二维码" src="./docs/images/developer_group.png" />
+<img width="400" alt="QQ 群二维码" src="./docs/images/developer-group.png" />
 
 </div>
 
@@ -40,8 +40,9 @@
 | ⌨️ **输入状态** | 实时显示"Bot 正在输入中…"状态 |
 | 📝 **Markdown** | 完整支持 Markdown 格式消息 |
 | 🛠️ **原生命令** | 支持 OpenClaw 原生命令 |
-| 💬 **引用上下文** | 解析 QQ `REFIDX_*` 引用消息，并将引用内容注入 AI 上下文 |
+| 💬 **引用上下文** | 解析用户回复的原始消息内容，注入 AI 上下文，让模型准确理解"在回复哪条消息" |
 | 📦 **大文件支持** | 大文件自动分片并行上传，最大支持 100 MB |
+| 🔐 **命令执行审批** | AI 执行命令前通过按钮消息请求审批，点击即可允许或拒绝 |
 
 ---
 
@@ -49,15 +50,11 @@
 
 > **说明：** 本插件仅作为**消息通道**，负责在 Umi 和 OpenClaw 之间传递消息。图片理解、语音转录、AI 画图等能力取决于你配置的 **AI 模型**以及在 OpenClaw 中安装的 **skill**，而非插件本身提供。
 
-### 💬 引用消息上下文（REFIDX）
+### 💬 引用消息上下文
 
-UMI 的引用事件通常只携带索引键（如 `REFIDX_xxx`），不直接返回原始消息全文。插件已支持从本地持久化索引中解析引用内容，并注入 AI 上下文，帮助模型更准确理解“用户引用的是哪条消息”。
+用户在 QQ 中引用某条消息发送时，插件会自动解析被引用的消息内容并注入 AI 上下文，让模型清楚地知道"用户在回复哪条消息"，从而给出更准确的回复。支持文本及媒体消息（图片/语音/视频/文件），换设备后同样可用。
 
-- 入站/出站消息中的 `ref_idx` 会自动建立索引。
-- 存储位置：`~/.openclaw/umibot/data/ref-index.jsonl`（网关重启后仍可恢复）。
-- 引用内容支持文本 + 媒体摘要（图片/语音/视频/文件）。
-
-<img width="360" src="docs/images/ref_msg.png" alt="引用消息上下文演示" />
+<img width="360" src="docs/images/ref-msg.png" alt="引用消息上下文演示" />
 
 ### 🎙️ 语音消息（STT）
 
@@ -67,7 +64,7 @@ UMI 的引用事件通常只携带索引键（如 `REFIDX_xxx`），不直接返
 >
 > **UmiBot**：明天（3月7日 周六）深圳的天气预报 🌤️ ...
 
-<img width="360" src="docs/images/fc7b2236896cfba3a37c94be5d59ce3e_720.jpg" alt="听语音演示" />
+<img width="360" src="docs/images/voice-stt.jpg" alt="听语音演示" />
 
 ### 📄 文件理解
 
@@ -77,7 +74,7 @@ UMI 的引用事件通常只携带索引键（如 `REFIDX_xxx`），不直接返
 >
 > **UmiBot**：收到！你上传了列夫·托尔斯泰的《战争与和平》中文版文本。从内容来看，这是第一章的开头……你想让我做什么？
 
-<img width="360" src="docs/images/07bff56ab68e03173d2af586eeb3bcee_720.jpg" alt="AI理解用户发送的文件" />
+<img width="360" src="docs/images/file-understand.jpg" alt="AI理解用户发送的文件" />
 
 ### 🖼️ 图片理解
 
@@ -87,7 +84,7 @@ UMI 的引用事件通常只携带索引键（如 `REFIDX_xxx`），不直接返
 >
 > **UmiBot**：哈哈，好可爱！这是Umi企鹅穿上小龙虾套装吗？🦞🐧 ...
 
-<img width="360" src="docs/images/59d421891f813b0d3c0cbe12574b6a72_720.jpg" alt="图片理解演示" />
+<img width="360" src="docs/images/image-understand.jpg" alt="图片理解演示" />
 
 ### 🎨 图片发送
 
@@ -97,7 +94,7 @@ UMI 的引用事件通常只携带索引键（如 `REFIDX_xxx`），不直接返
 
 AI 可直接发送图片，支持本地文件路径和网络 URL。格式：jpg/png/gif/webp/bmp。
 
-<img width="360" src="docs/images/4645f2b3a20822b7f8d6664a708529eb_720.jpg" alt="发图片演示" />
+<img width="360" src="docs/images/image-send.jpg" alt="发图片演示" />
 
 ### 🔊 语音发送
 
@@ -107,7 +104,7 @@ AI 可直接发送图片，支持本地文件路径和网络 URL。格式：jpg/
 
 AI 可直接发送语音消息。格式：mp3/wav/silk/ogg，无需安装 ffmpeg。
 
-<img width="360" src="docs/images/21dce8bfc553ce23d1bd1b270e9c516c.jpg" alt="发语音演示" />
+<img width="360" src="docs/images/voice-send.jpg" alt="发语音演示" />
 
 ### ⏰ 定时提醒（主动消息）
 
@@ -125,9 +122,21 @@ AI 可直接发送语音消息。格式：mp3/wav/silk/ogg，无需安装 ffmpeg
 >
 > **UmiBot**：*（发送 .txt 文件）*
 
-AI 可直接发送文件。任意格式，最大 100MB。大文件自动分片并行上传。
+AI 可直接发送文件，任意格式均可。
 
-<img width="360" src="docs/images/17cada70df90185d45a2d6dd36e92f2f_720.jpg" alt="发文件演示" />
+<img width="360" src="docs/images/file-send.jpg" alt="发文件演示" />
+
+v1.6.6 起支持大文件传输：图片最大 20MB，视频最大 30MB，附件最大 100MB，每日累计传输上限 2GB。
+
+<img width="360" src="docs/images/large-file-transfer.jpg" alt="大文件传输演示" />
+
+### 🔐 命令执行审批
+
+当 AI 需要执行命令时，插件会通过 QQ 消息发送带按钮的审批请求，你可以点击 **✅ 允许一次**、**⭐ 始终允许** 或 **❌ 拒绝** 来控制命令是否执行。
+
+通过 `/bot-approve` 指令可以管理审批模式（白名单 / 关闭 / 严格模式）。
+
+<img width="360" src="docs/images/approve.png" alt="命令执行审批演示" />
 
 ### 🎬 视频发送
 
@@ -137,7 +146,7 @@ AI 可直接发送文件。任意格式，最大 100MB。大文件自动分片�
 
 AI 可直接发送视频，支持本地文件和公网 URL。
 
-<img width="360" src="docs/images/85d03b8a216f267ab7b2aee248a18a41_720.jpg" alt="发视频演示" />
+<img width="360" src="docs/images/video-send.jpg" alt="发视频演示" />
 
 > **底层细节：** 上传去重缓存、有序队列发送、音频格式多层降级。
 
@@ -183,6 +192,11 @@ AI 可直接发送视频，支持本地文件和公网 URL。
 
 > ⚠️ 热更新指令暂不支持 Windows 系统，在 Windows 上发送 `/bot-upgrade` 会返回手动升级指引。
 
+> ⚠️ v1.6.6 及以下版本暂不支持通过 `/bot-upgrade` 执行热更新，请通过以下命令升级：
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/tencent-connect/openclaw-umibot/main/scripts/upgrade-via-npm.sh | bash
+> ```
+
 <img width="360" src="docs/images/hot-update.jpg" alt="一键热更新演示" />
 
 #### `/bot-logs` — 日志导出
@@ -203,6 +217,26 @@ AI 可直接发送视频，支持本地文件和公网 URL。
 >
 > **UMIBot**：📖 /bot-upgrade 用法：…
 
+#### `/bot-approve` — 审批配置管理
+
+> **你**：`/bot-approve`
+>
+> **UMIBot**：🔐 命令执行审批配置 — 开启审批 / 关闭审批 / 严格模式 / 恢复默认 / 查看当前配置
+
+管理 AI 命令执行审批策略，支持以下子命令：
+
+| 子命令 | 说明 |
+|--------|------|
+| `/bot-approve on` | 开启审批（白名单模式，推荐） |
+| `/bot-approve off` | 关闭审批，命令直接执行 |
+| `/bot-approve always` | 严格模式，每次执行都需审批 |
+| `/bot-approve reset` | 恢复框架默认值 |
+| `/bot-approve status` | 查看当前审批配置 |
+
+#### `/bot-clear-storage` — 清理通过 UMIBot 对话产生的文件以及下载的资源（保存在 OpenClaw 运行环境的主机上）
+
+`/bot-clear-storage` 列出对话产生的文件以及下载的资源目录里的文件，使用`/bot-clear-storage -- force`确定删除。
+
 ---
 
 ## 🚀 快速开始
@@ -216,15 +250,15 @@ AI 可直接发送视频，支持本地文件和公网 URL。
 2. 手机 Umi 扫码后选择**同意**，即完成注册，进入 Umi 机器人配置页。
 3. 点击**创建机器人**，即可直接新建一个 Umi 机器人。
 
-<img width="720" alt="创建机器人" src="docs/images/create_robot.png" />
+<img width="720" alt="创建机器人" src="docs/images/create-robot.png" />
 
 > ⚠️ 机器人创建后会自动出现在你的 Umi 消息列表中，并发送第一条消息。但在完成下面的配置之前，发消息会提示"该机器人去火星了"，属于正常现象。
 
-<img width="400" alt="机器人打招呼" src="docs/images/bot_say_hello.jpg" />
+<img width="400" alt="机器人打招呼" src="docs/images/bot-say-hello.jpg" />
 
 4. 在机器人页面中找到 **AppID** 和 **AppSecret**，分别点击右侧**复制**按钮，保存到记事本或备忘录中。**AppSecret 不支持明文保存，离开页面后再查看会强制重置，请务必妥善保存。**
 
-<img width="720" alt="找到 AppID 和 AppSecret" src="docs/images/find_appid_secret.png" />
+<img width="720" alt="找到 AppID 和 AppSecret" src="docs/images/find-appid-secret.png" />
 
 > 详细图文教程请参阅 [官方指南](https://cloud.tencent.com/developer/article/2626045)。
 
@@ -239,7 +273,7 @@ curl -fsSL https://raw.githubusercontent.com/tencent-connect/umibot/main/scripts
 
 一行命令搞定：下载脚本 → 清理旧插件 → 安装 → 配置通道 → 启动服务。完成后打开 UMI 即可开始聊天！
 
-> 首次安装**必须**传 `--appid` 和 `--secret`。后续升级如已有配置：
+> 首次安装**必须**传 `--appid` 和 `--secret`。后续升级执行此指令可以升级为最新版：
 > ```bash
 > curl -fsSL https://raw.githubusercontent.com/tencent-connect/umibot/main/scripts/upgrade-via-npm.sh | bash
 > ```
@@ -454,7 +488,7 @@ STT 支持两级配置，按优先级查找：
 感谢[腾讯云Lighthouse](https://cloud.tencent.com/product/lighthouse)的深度合作，养小龙虾，首选腾讯云Lighthouse！
 
 <a href="https://cloud.tencent.com/product/lighthouse">
-  <img alt="腾讯云 Lighthouse" src="./docs/images/lighthouse_head.png" height="500" style="max-width:80%; height:auto;"/>
+  <img alt="腾讯云 Lighthouse" src="./docs/images/lighthouse-head.png" height="500" style="max-width:80%; height:auto;"/>
 </a>
 
 ## ⭐ Star History
