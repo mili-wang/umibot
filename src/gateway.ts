@@ -621,7 +621,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
       msgQueue.executeImmediate(msg);
       return;
     }
-
+    
     const receivedAt = Date.now();
     const peerId = msgQueue.getMessagePeerId(msg);
 
@@ -658,8 +658,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         log?.info(`[umibot:${account.accountId}] Slash command delegated to AI: ${content.slice(0, 40)}`);
         msg.content = delegatePrompt;
         msgQueue.enqueue(msg);
-        return;
-      }
+      return;
+    }
 
       // 命中插件级指令，直接回复
       log?.info(`[umibot:${account.accountId}] Slash command matched: ${content}, replying directly`);
@@ -699,8 +699,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         } catch (fileErr) {
           log?.error(`[umibot:${account.accountId}] Failed to send slash command file: ${fileErr}`);
         }
-      }
-    } catch (err) {
+          }
+        } catch (err) {
       log?.error(`[umibot:${account.accountId}] Slash command error: ${err}`);
       // 出错时回退到正常入队
       msgQueue.enqueue(msg);
@@ -848,8 +848,8 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         const inputNotifyPromise: Promise<string | undefined> = (async () => {
           if (!isC2C) return undefined;
           if (!ENABLE_C2C_INPUT_NOTIFY) return undefined;
-          try {
-            let token = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
+        try {
+          let token = await getAccessToken(account.appId, account.clientSecret, account.umi6Sn);
             try {
               const notifyResponse = await sendC2CInputNotify(token, event.senderId, event.messageId, TYPING_INPUT_SECOND);
               log?.info(`[umibot:${account.accountId}] Sent input notify to ${event.senderId}${notifyResponse.refIdx ? `, got refIdx=${notifyResponse.refIdx}` : ""}`);
@@ -885,10 +885,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 throw notifyErr;
               }
             }
-          } catch (err) {
-            log?.error(`[umibot:${account.accountId}] sendC2CInputNotify error: ${err}`);
+        } catch (err) {
+          log?.error(`[umibot:${account.accountId}] sendC2CInputNotify error: ${err}`);
             return undefined;
-          }
+        }
         })();
 
         const isGroupChat = event.type === "guild" || event.type === "group";
@@ -958,7 +958,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         // refMsgIdx 已由 parseRefIndices 在引用消息类型时合并了 msg_elements[0].msg_idx 的优先级
         if (event.refMsgIdx) {
           const refEntry = getRefIndex(event.refMsgIdx);
-          replyToId = event.refMsgIdx;
+            replyToId = event.refMsgIdx;
           replyToIsQuote = true;
 
           if (refEntry) {
@@ -973,7 +973,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
               const refData = { content: refElement.content ?? "", attachments: refElement.attachments };
               replyToBody = await formatMessageReferenceForAgent(refData, { appId: account.appId, peerId, cfg, log });
               log?.info(`[umibot:${account.accountId}] Quote detected via msg_elements[0] (cache miss): id=${replyToId}, sender=${replyToSender ?? "unknown"}, content="${(replyToBody ?? "").slice(0, 80)}..."`);
-            } else {
+          } else {
               // 引用消息但 msg_elements 为空：AI 只能知道"用户引用了一条消息"
               log?.info(`[umibot:${account.accountId}] Quote detected (MSG_TYPE_QUOTE) but no msg_elements: refMsgIdx=${event.refMsgIdx}`);
             }
@@ -1089,10 +1089,10 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
 
         // --- 动态上下文 ---
         const dynLines: string[] = [];
-        if (imageUrls.length > 0) {
+          if (imageUrls.length > 0) {
           dynLines.push(`- 图片: ${imageUrls.join(", ")}`);
-        }
-        if (uniqueVoicePaths.length > 0 || uniqueVoiceUrls.length > 0) {
+          }
+          if (uniqueVoicePaths.length > 0 || uniqueVoiceUrls.length > 0) {
           dynLines.push(`- 语音: ${[...uniqueVoicePaths, ...uniqueVoiceUrls].join(", ")}`);
         }
         if (uniqueVoiceAsrReferTexts.length > 0) {
@@ -1312,7 +1312,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             currentMessage: lastPart,
           });
         } else {
-          // 命令直接透传，不注入上下文
+        // 命令直接透传，不注入上下文
           userMessage = senderPrefix ? `${senderPrefix}${quotePart}${userContent}${isAtYouTag}` : `${quotePart}${userContent}`;
         }
         let agentBody = userContent.startsWith("/")
@@ -1346,7 +1346,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
             },
           });
         }
-
+        
         log?.info(`[umibot:${account.accountId}] agentBody length: ${agentBody.length}`);
 
         const fromAddress = event.type === "guild" ? `umibot:channel:${event.channelId}`
@@ -1694,7 +1694,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   if (streamingController.shouldFallbackToStatic) {
                     log?.info(`[umibot:${account.accountId}] Streaming API unavailable, falling back to static for this deliver`);
                     // 不 return，继续走普通发送逻辑（payload.text 是完整文本）
-                  } else {
+                      } else {
                     // 流式正常处理，不走普通发送逻辑
                     pluginRuntime.channel.activity.record({
                       channel: "umibot",
@@ -1736,21 +1736,21 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     replyText, deliverEvent, deliverActx, sendWithRetry, consumeQuoteRef,
                   );
                   if (mediaResult.handled) {
-                    pluginRuntime.channel.activity.record({
-                      channel: "umibot",
-                      accountId: account.accountId,
-                      direction: "outbound",
-                    });
-                    return;
-                  }
-                  replyText = mediaResult.normalizedText;
-
-                  // ============ 结构化载荷检测与分发 ============
-                  const recordOutboundActivity = () => pluginRuntime.channel.activity.record({
+                  pluginRuntime.channel.activity.record({
                     channel: "umibot",
                     accountId: account.accountId,
                     direction: "outbound",
                   });
+                  return;
+                }
+                  replyText = mediaResult.normalizedText;
+                
+                // ============ 结构化载荷检测与分发 ============
+                  const recordOutboundActivity = () => pluginRuntime.channel.activity.record({
+                        channel: "umibot",
+                        accountId: account.accountId,
+                        direction: "outbound",
+                      });
                   const handled = await handleStructuredPayload(replyCtx, replyText, recordOutboundActivity);
                   if (handled) return;
 
@@ -1764,11 +1764,11 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                     sendWithRetry, consumeQuoteRef, toolMediaUrls,
                   );
 
-                  pluginRuntime.channel.activity.record({
-                    channel: "umibot",
-                    accountId: account.accountId,
-                    direction: "outbound",
-                  });
+                      pluginRuntime.channel.activity.record({
+                        channel: "umibot",
+                        accountId: account.accountId,
+                        direction: "outbound",
+                      });
                 };
 
                 // ============ Debounce 合并回复 ============
@@ -1807,7 +1807,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   if (streamingController.shouldFallbackToStatic) {
                     log?.info(`[umibot:${account.accountId}] Streaming onError: no chunk sent, falling back to static error handling`);
                     // 不 return，继续走普通错误处理
-                  } else {
+                    } else {
                     return;
                   }
                 }
@@ -1883,7 +1883,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 streamingController.markFullyComplete();
                 await streamingController.onIdle();
                 log?.debug?.(`[umibot:${account.accountId}] Streaming controller finalized`);
-              } catch (err) {
+        } catch (err) {
                 log?.error(`[umibot:${account.accountId}] Streaming finalization error: ${err}`);
                 // 尝试中止
                 try { await streamingController.abortStreaming(); } catch { /* ignore */ }
@@ -2127,7 +2127,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                   senderId: event.author.member_openid,
                   senderName: event.author.username,
                   content: event.content,
-                  messageId: event.id, 
+                  messageId: event.id,
                   timestamp: event.timestamp,
                   groupOpenid: event.group_openid,
                   attachments: event.attachments,
@@ -2217,7 +2217,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 lastSeq = null;
                 // P1-2: 清除持久化的 Session
                 clearSession(account.accountId);
-                shouldRefreshToken = true;
+                  shouldRefreshToken = true;
                 log?.info(`[umibot:${account.accountId}] Will refresh token and retry with full intents (${FULL_INTENTS_DESC})`);
               }
               cleanup();

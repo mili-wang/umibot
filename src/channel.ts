@@ -190,8 +190,7 @@ export const qqbotPlugin: ChannelPlugin<ResolvedQQBotAccount> = {
     },
   },
   // CLI onboarding wizard
-  // @ts-ignore onboarding removed from ChannelPlugin type in 2026.3.23 but still supported at runtime
-  onboarding: qqbotOnboardingAdapter,
+  onboarding: umibotOnboardingAdapter,
 
   config: {
     listAccountIds: (cfg) => listQQBotAccountIds(cfg),

@@ -314,31 +314,17 @@ export function resetFfmpegCache(): void {
   _ffmpegCheckPromise = null;
 }
 
-// ============ silk-wasm 兼容性 ============
+import {
+  checkSilkWasmAvailable,
+  isSilkWasmDisabled,
+  shouldProbeSilkWasmAtStartup,
+} from "./silk-wasm-loader.js";
 
-let _silkWasmAvailable: boolean | null = null;
-
-/**
- * 检测 silk-wasm 是否可用
- *
- * silk-wasm 依赖 WASM 运行时，在某些环境（如老版本 Node、某些容器）可能不可用。
- * 提前检测避免运行时崩溃。
- */
-export async function checkSilkWasmAvailable(): Promise<boolean> {
-  if (_silkWasmAvailable !== null) return _silkWasmAvailable;
-
-  try {
-    const { isSilk } = await import("silk-wasm");
-    // 用一个空 buffer 快速测试 WASM 是否能加载
-    isSilk(new Uint8Array(0));
-    _silkWasmAvailable = true;
-    console.log("[platform] silk-wasm: available");
-  } catch (err) {
-    _silkWasmAvailable = false;
-    console.warn(`[platform] silk-wasm: NOT available (${err instanceof Error ? err.message : String(err)})`);
-  }
-  return _silkWasmAvailable;
-}
+export {
+  checkSilkWasmAvailable,
+  isSilkWasmDisabled,
+  shouldProbeSilkWasmAtStartup,
+};
 
 // ============ 启动环境诊断 ============
 
@@ -350,7 +336,8 @@ export interface DiagnosticReport {
   tempDir: string;
   dataDir: string;
   ffmpeg: string | null;
-  silkWasm: boolean;
+  /** true/false=已探测；null=启动时未加载 WASM（懒加载） */
+  silkWasm: boolean | null;
   warnings: string[];
 }
 
@@ -380,10 +367,17 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
     );
   }
 
-  // 检测 silk-wasm
-  const silkWasm = await checkSilkWasmAvailable();
-  if (!silkWasm) {
-    warnings.push("⚠️ silk-wasm 不可用。UMI 语音消息的收发将无法工作。请确认 Node.js 版本 >= 16 且 WASM 支持正常");
+  // silk-wasm：默认不在启动时加载 WASM（避免 import 时初始化 Emscripten）
+  let silkWasm: boolean | null = null;
+  if (isSilkWasmDisabled()) {
+    warnings.push("⚠️ silk-wasm 已通过 UMIBOT_DISABLE_SILK_WASM 禁用（实验 A）。语音 SILK 转码不可用，请安装 ffmpeg 或使用 WAV/MP3 直传");
+  } else if (shouldProbeSilkWasmAtStartup()) {
+    silkWasm = await checkSilkWasmAvailable(true);
+    if (!silkWasm) {
+      warnings.push("⚠️ silk-wasm 不可用。UMI 语音消息的收发将无法工作。请确认 Node.js 版本 >= 16 且 WASM 支持正常");
+    }
+  } else {
+    warnings.push("ℹ️ silk-wasm 启动探测已跳过（懒加载）。首次语音/TTS 时才加载 WASM；设 UMIBOT_PROBE_SILK_AT_STARTUP=1 可恢复启动探测");
   }
 
   // 检查数据目录可写性
@@ -422,7 +416,9 @@ export async function runDiagnostics(): Promise<DiagnosticReport> {
   console.log(`  主目录: ${homeDir}`);
   console.log(`  数据目录: ${dataDir}`);
   console.log(`  ffmpeg: ${ffmpegPath ?? "未安装"}`);
-  console.log(`  silk-wasm: ${silkWasm ? "可用" : "不可用"}`);
+  console.log(
+    `  silk-wasm: ${silkWasm === null ? "懒加载（启动未探测）" : silkWasm ? "可用" : "不可用"}`,
+  );
   if (warnings.length > 0) {
     console.log("  --- 警告 ---");
     for (const w of warnings) {
