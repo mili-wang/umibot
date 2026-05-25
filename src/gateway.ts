@@ -1974,6 +1974,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
               } else {
                 // 新连接，发送 Identify，始终使用完整权限
                 log?.info(`[umibot:${account.accountId}] Sending identify with intents: ${FULL_INTENTS} (${FULL_INTENTS_DESC})`);
+                log?.info(`[umibot:${account.accountId}] room_id: ${event.room_id}, ${room_id}`);
                 ws.send(JSON.stringify({
                   op: 2,
                   room_id: event.room_id ?? room_id,
