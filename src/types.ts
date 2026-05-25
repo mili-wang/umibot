@@ -430,6 +430,7 @@ export interface WSPayload {
   d?: unknown;
   s?: number;
   t?: string;
+  room_id?: string;
 }
 
 

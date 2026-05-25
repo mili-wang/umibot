@@ -1941,7 +1941,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
         try {
           const rawData = data.toString();
           const payload = JSON.parse(rawData) as WSPayload;
-          const { op, d, s, t } = payload;
+          const { op, d, s, t, room_id } = payload;
 
           if (s) {
             lastSeq = s;
@@ -1966,7 +1966,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
               // 如果有 session_id，尝试 Resume
               if (sessionId && lastSeq !== null) {
                 log?.info(`[umibot:${account.accountId}] Attempting to resume session ${sessionId}`);
-                const resumePayload = { op: 6, d: { token: `UMIBot ${accessToken}`, session_id: sessionId, seq: lastSeq } };
+                const resumePayload = { room_id, op: 6, d: { token: `UMIBot ${accessToken}`, session_id: sessionId, seq: lastSeq } };
                 log?.info(`[umibot:${account.accountId}] WS 发送 op=6 Resume session_id=${sessionId} seq=${lastSeq}`);
                 ws.send(JSON.stringify(resumePayload));
               } else {
@@ -1975,6 +1975,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
                 ws.send(JSON.stringify({
                   op: 2,
                   d: {
+                    room_id,
                     token: `UMIBot ${accessToken}`,
                     intents: FULL_INTENTS,
                     shard: [0, 1],
@@ -1988,7 +1989,7 @@ export async function startGateway(ctx: GatewayContext): Promise<void> {
               heartbeatInterval = setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) {
                   log?.info(`[umibot:${account.accountId}] WS 发送 op=1 Heartbeat d=${lastSeq}`);
-                  ws.send(JSON.stringify({ op: 1, d: lastSeq }));
+                  ws.send(JSON.stringify({ room_id, op: 1, d: lastSeq }));
                 }
               }, interval);
               break;
